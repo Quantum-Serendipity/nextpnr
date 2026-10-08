@@ -130,7 +130,7 @@ std::pair<CellInfo *, PortRef> XilinxPacker::insert_pad_and_buf(CellInfo *npnr_i
     if (!iobuf.cell) {
         // No IO buffer, need to create one
         log_error(
-                "   IO port '%s' is missing an IO buffer, do you need to remove -noiopad from your Yosys arguments?\n",
+                "    IO port '%s' is missing an IO buffer, do you need to remove -noiopad from your Yosys arguments?\n",
                 npnr_io->name.c_str(ctx));
     } else {
         log_info("    IO port '%s' driven by %s '%s'\n", npnr_io->name.c_str(ctx), iobuf.cell->type.c_str(ctx),
@@ -970,6 +970,8 @@ void XC7Packer::pack_idelayctrl()
     idelayctrl->disconnectPort(id_REFCLK);
     idelayctrl->disconnectPort(id_RST);
 
+    unsigned idelayctrl_and_luts = 0;
+
     if (rdy != nullptr) {
         // AND together all the RDY signals
         std::vector<NetInfo *> int_anded_rdy;
@@ -981,6 +983,7 @@ void XC7Packer::pack_idelayctrl()
                             : create_internal_net(idelayctrl->name, "ANDED_RDY_" + std::to_string(j), false);
             create_lut(idelayctrl->name.str(ctx) + "/RDY_AND_LUT_" + std::to_string(j),
                        {int_anded_rdy.at(j - 1), dup_rdys.at(j)}, anded_net, Property(8));
+            idelayctrl_and_luts++;
             int_anded_rdy.push_back(anded_net);
         }
     }
@@ -989,6 +992,9 @@ void XC7Packer::pack_idelayctrl()
     flush_cells();
 
     ioctrl_rules[id_IDELAYCTRL].new_type = id_IDELAYCTRL_IDELAYCTRL;
+
+    if (idelayctrl_and_luts > 0)
+        log_info("    Created %d LUT cells from RDY signals of IDELAYCTRL\n", idelayctrl_and_luts);
 
     generic_xform(ioctrl_rules);
 }

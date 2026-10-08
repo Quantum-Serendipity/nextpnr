@@ -630,6 +630,18 @@ void configure_static(Arch *arch, PlacerStaticCfg &cfg)
     cfg.timing_c = (120 - 22 * arch->args.speed) * 6;
     cfg.timing_mx = (120 - 22 * arch->args.speed);
     cfg.timing_my = (120 - 22 * arch->args.speed);
+
+    cfg.predict_delay = [](Context *ctx, const PlacerStaticCfg &cfg, Loc src_loc, IdString src_pin, Loc dst_loc,
+                           IdString dst_pin) -> delay_t {
+        if ((src_pin == id_FCO && dst_pin == id_FCI) || dst_pin.in(id_FXA, id_FXB) ||
+            (src_pin == id_F && dst_pin == id_DI))
+            return 0;
+
+        int dx = abs(src_loc.x - dst_loc.x), dy = abs(src_loc.y - dst_loc.y);
+
+        return (80 - 9 * ctx->args.speed) *
+               (6 + std::max(dx - 5, 0) + std::max(dy - 5, 0) + 2 * (std::min(dx, 5) + std::min(dy, 5)));
+    };
 }
 } // namespace
 
@@ -683,11 +695,30 @@ bool Arch::place()
     return true;
 }
 
+void Arch::update_slice_flags()
+{
+    for (auto &cell : cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->type != id_TRELLIS_COMB)
+            continue;
+        NPNR_ASSERT(ci->bel != BelId());
+        int flags = ci->combInfo.flags;
+        lutperm_allowed.at(get_slice_index(ci->bel.location.x, ci->bel.location.y,
+                                           (getBelLocation(ci->bel).z >> lc_idx_shift) / 2)) =
+                (((flags & ArchCellInfo::COMB_LUTRAM) || (flags & ArchCellInfo::COMB_RAMW_BLOCK))
+                         ? LutPermRule::NONE
+                         : ((flags & ArchCellInfo::COMB_CARRY) ? LutPermRule::CARRY : LutPermRule::ALL));
+    }
+}
+
 bool Arch::route()
 {
     std::string router = str_or_default(settings, id_router, defaultRouter);
 
     disable_router_lutperm = getCtx()->setting<bool>("arch.disable_router_lutperm", false);
+
+    // This is needed if we have loaded a pre-placed design
+    update_slice_flags();
 
     setup_wire_locations();
     route_ecp5_globals(getCtx());

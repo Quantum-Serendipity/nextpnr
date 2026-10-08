@@ -310,6 +310,13 @@ void XilinxPacker::pack_lutffs()
                 ci->constr_z = lut->constr_z + (BEL_FF - BEL_6LUT);
                 ++pairs;
             } else {
+                // don't pair an FF with an SRL/LUTRAM unless it shares the
+                // slice clock (same net and polarity)
+                NetInfo *lut_clk = lut->getPort(id_CLK);
+                if (lut_clk != nullptr &&
+                    (ci->getPort(id_CK) != lut_clk || bool_or_default(ci->params, id_IS_CLK_INVERTED, false) !=
+                                                              bool_or_default(lut->params, id_IS_CLK_INVERTED, false)))
+                    continue;
                 lut->constr_children.push_back(ci);
                 lut->cluster = lut->name;
                 ci->cluster = lut->name;
@@ -360,6 +367,7 @@ void XilinxPacker::legalise_muxf_tree(CellInfo *curr, std::vector<CellInfo *> &m
                 pr.cell = curr;
                 pr.port = p;
                 feed_through_lut(pn, {pr});
+                muxf_feed_through_luts++;
                 continue;
             }
             seen_leaves.insert(pn->driver.cell->name);
@@ -461,6 +469,8 @@ void XilinxPacker::pack_muxfs()
         root->cluster = root->name;
         constrain_muxf_tree(root, root, 0);
     }
+    if (muxf_feed_through_luts > 0)
+        log_info("    Created %d feed-through LUTs from MUXF trees\n", muxf_feed_through_luts);
 }
 
 void XilinxPacker::finalise_muxfs()

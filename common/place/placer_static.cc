@@ -637,7 +637,7 @@ class StaticPlacer
     void insert_dark()
     {
         log_info("⌁ inserting dark nodes...\n");
-        for (int group = 0; group < int(groups.size()); group++) {
+        for (int group = cfg.logic_groups; group < int(groups.size()); group++) {
             const auto &cg = cfg.cell_groups.at(group);
             auto &g = groups.at(group);
             int dark_count = 0;
@@ -785,7 +785,7 @@ class StaticPlacer
         }
     }
 
-    void compute_overlap()
+    void compute_overlap(bool print)
     {
         // populate for concrete cells only
         compute_conc_density();
@@ -807,7 +807,8 @@ class StaticPlacer
             if (dump_density)
                 g.conc_density.write_csv(stringf("out_conc_density_%d_%d.csv", iter, idx));
         }
-        log_info("overlap: %s\n", overlap_str.c_str());
+        if (print)
+            log_info("   overlap: %s\n", overlap_str.c_str());
     }
 
     void run_fft(int group)
@@ -1085,7 +1086,8 @@ class StaticPlacer
         }
         coord_dist = std::sqrt(coord_dist / (2 * float(n)));
         grad_dist = std::sqrt(grad_dist / (2 * float(n)));
-        log_info("coord_dist: %f grad_dist: %f\n", coord_dist, grad_dist);
+        if (ctx->verbose)
+            log_info("coord_dist: %f grad_dist: %f\n", coord_dist, grad_dist);
         return coord_dist / grad_dist;
         // return 0.1;
     }
@@ -1237,10 +1239,11 @@ class StaticPlacer
                 dist += std::sqrt(std::pow(last_pos.x - mc.pos.x, 2) + std::pow(last_pos.y - mc.pos.y, 2));
             }
         }
-        log_info("   update_chains distance %.2f\n", dist);
+        if (ctx->verbose)
+            log_info("   update_chains distance %.2f\n", dist);
     }
 
-    void step()
+    void step(bool print)
     {
         // TODO: update penalties; wirelength factor; etc
         steplen = get_steplen();
@@ -1248,7 +1251,8 @@ class StaticPlacer
         for (auto p : dens_penalty) {
             penalty_str += stringf("%s%.2f", penalty_str.empty() ? "" : ", ", p);
         }
-        log_info("iter=%d steplen=%f a=%f penalty=[%s]\n", iter, steplen, nesterov_a, penalty_str.c_str());
+        if (print)
+            log_info("iter=%d steplen=%f a=%f penalty=[%s]\n", iter, steplen, nesterov_a, penalty_str.c_str());
         float a_next = (1.0f + std::sqrt(4.0f * nesterov_a * nesterov_a + 1)) / 2.0f;
         // Update positions using Nesterov's
         for (int idx = 0; idx < int(mcells.size()); idx++) {
@@ -1278,8 +1282,9 @@ class StaticPlacer
             }
             log_info("    potentials: [%s]\n", pot_str.c_str());
         }
-        log_info("   system potential: %f hpwl: %f\n", system_potential(), system_hpwl());
-        compute_overlap();
+        if (print)
+            log_info("   system potential: %.0f hpwl: %.0f\n", system_potential(), system_hpwl());
+        compute_overlap(print);
         if ((iter % 10) == 0)
             update_timing();
     }
@@ -1295,8 +1300,8 @@ class StaticPlacer
             RealPair drv_loc = cell_loc(ni->driver.cell, false);
             for (auto usr : ni->users.enumerate()) {
                 RealPair usr_loc = cell_loc(usr.value.cell, false);
-                delay_t est_delay = cfg.timing_c + cfg.timing_mx * std::abs(drv_loc.x - usr_loc.x) +
-                                    cfg.timing_my * std::abs(drv_loc.y - usr_loc.y);
+                delay_t est_delay = cfg.predict_delay(ctx, cfg, Loc(drv_loc.x, drv_loc.y, 0), ni->driver.port,
+                                                      Loc(usr_loc.x, usr_loc.y, 0), usr.value.port);
                 tmg.set_route_delay(CellPortKey(usr.value), DelayPair(est_delay));
             }
         }
@@ -1651,7 +1656,7 @@ class StaticPlacer
         prepare_cells();
         init_cells();
         init_nets();
-        // insert_dark();
+        insert_dark();
         insert_spacer();
 
         prepare_density_bins();
@@ -1663,7 +1668,7 @@ class StaticPlacer
             float best_overlap = 1.0;
             int best_overlap_iter = 0;
             while (true) {
-                step();
+                step(ctx->verbose || ((iter % 10) == 0));
                 for (auto &p : dens_penalty)
                     if (p < 50.0)
                         p *= 1.025;
@@ -1692,6 +1697,8 @@ class StaticPlacer
                         best_overlap_iter = iter;
                     }
                     if (logic_overlap < 0.1 || (logic_overlap < 0.2 && iter > (best_overlap_iter + 50))) {
+                        log_info("final iter=%d system potential: %.0f hpwl: %.0f\n", iter, system_potential(),
+                                 system_hpwl());
                         legalise_step(false);
                         break;
                     }
@@ -1721,6 +1728,12 @@ PlacerStaticCfg::PlacerStaticCfg(Context *ctx)
 
     hpwl_scale_x = 1;
     hpwl_scale_y = 1;
+
+    predict_delay = [](Context *ctx, const PlacerStaticCfg &cfg, Loc src_loc, IdString /*src_pin*/, Loc dst_loc,
+                       IdString /*dst_pin*/) -> delay_t {
+        return cfg.timing_c + delay_t(cfg.timing_mx * std::abs(dst_loc.x - src_loc.x)) +
+               delay_t(cfg.timing_my * std::abs(dst_loc.y - src_loc.y));
+    };
 }
 
 NEXTPNR_NAMESPACE_END

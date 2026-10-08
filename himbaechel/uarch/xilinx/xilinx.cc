@@ -362,6 +362,16 @@ void XilinxImpl::configurePlacerStatic(PlacerStaticCfg &cfg)
     cfg.timing_mx = 25;
     cfg.timing_my = 50;
 
+    cfg.predict_delay = [](Context *ctx, const PlacerStaticCfg &cfg, Loc src_loc, IdString src_pin, Loc dst_loc,
+                           IdString dst_pin) -> delay_t {
+        if (dst_pin == id_CIN && src_pin == id_CO3)
+            return 0;
+        // TODO: improve sophistication here based on old nextpnr-xilinx code
+        int dist_x = std::abs(dst_loc.x - src_loc.x), dist_y = std::abs(dst_loc.y - src_loc.y);
+        return 500 + 12 * (2 * std::max(dist_y - 6, 0) + 4 * std::min(dist_y, 6) + std::max(dist_x - 12, 0) +
+                           2 * std::min(dist_x, 12));
+    };
+
     {
         cfg.cell_groups.emplace_back();
         auto &comb = cfg.cell_groups.back();
@@ -564,6 +574,7 @@ void XilinxImpl::assign_cell_tags()
             ct.lut.di1_net = ci->getPort(id_DI1);
             ct.lut.di2_net = ci->getPort(id_DI2);
             ct.lut.wclk = ci->getPort(id_CLK);
+            ct.lut.we = ci->getPort(id_WE);
             ct.lut.memory_group = 0; // fixme
             ct.lut.is_srl = ci->attrs.count(id_X_LUT_AS_SRL);
             ct.lut.is_memory = ci->attrs.count(id_X_LUT_AS_DRAM);
@@ -775,8 +786,12 @@ delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel,
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src_bel.tile, sx, sy);
     tile_xy(ctx->chip_info, dst_bel.tile, dx, dy);
+    if (dst_pin == id_CIN && src_pin == id_CO3)
+        return 0;
     // TODO: improve sophistication here based on old nextpnr-xilinx code
-    return 500 + 25 * (2 * std::abs(dy - sy) + std::abs(dx - sx));
+    int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
+    return 500 + 12 * (2 * std::max(dist_y - 6, 0) + 4 * std::min(dist_y, 6) + std::max(dist_x - 12, 0) +
+                       2 * std::min(dist_x, 12));
 }
 
 BoundingBox XilinxImpl::getRouteBoundingBox(WireId src, WireId dst) const

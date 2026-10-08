@@ -132,6 +132,11 @@ template <typename FrontendType> struct GenericFrontend
         m.is_toplevel = true;
         m.prefix = "";
         m.path = top;
+
+#ifndef NPNR_DISABLE_THREADS
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+#endif
+
         ctx->top_module = top;
         // Do the actual import, starting from the top level module
         import_module(m, top.str(ctx), top.str(ctx), mod_refs.at(top.str(ctx)));

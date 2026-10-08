@@ -426,8 +426,12 @@ struct FasmBackend
                 for (int k = 0; k < 6; k++) {
                     if ((j & (1 << k)) == 0)
                         continue;
-                    for (auto &p2l : phys_to_log[k])
-                        log_index |= (1 << log_to_bit[p2l]);
+                    for (auto &p2l : phys_to_log[k]) {
+                        if (!log_to_bit.count(p2l))
+                            log_error("cell '%s': X_ORIG_PORT_%s token '%s' does not name a logical input\n",
+                                      ctx->nameOf(lut), phys_inputs[k].c_str(ctx), p2l.c_str());
+                        log_index |= (1 << log_to_bit.at(p2l));
+                    }
                 }
                 bits[j] = (init.str.at(log_index) == Property::S1);
             }
@@ -1691,14 +1695,15 @@ struct FasmBackend
             filter_lookup = Xc7MMCM::filter_lookup_high;
         else
             filter_lookup = Xc7MMCM::filter_lookup_optimized;
-        write_int_vector("FILTREG1_RESERVED[11:0]", filter_lookup[clkfbout_mult - 1], 12);
+        // TABLE holds the loop-filter word; FILTREG1_RESERVED is a constant 0x8 (matches Vivado)
+        write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
 
         // 0x9900 enables fractional counters
         // only int counters would be 0x1 << 8
         // 0xffff enables everything, I suppose, this is what is used in xap888
         write_int_vector("POWER_REG_POWER_REG_POWER_REG[15:0]", 0xffff, 16);
         write_bit("LOCKREG3_RESERVED[0]");
-        write_int_vector("TABLE[9:0]", 0x3d4, 10);
+        write_int_vector("TABLE[9:0]", filter_lookup[clkfbout_mult - 1], 10);
         pop(2);
     }
     void write_dsp_cell(CellInfo *ci)

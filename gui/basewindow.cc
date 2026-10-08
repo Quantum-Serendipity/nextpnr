@@ -369,8 +369,14 @@ void BaseMainWindow::open_json()
         disableActions();
         if (ctx->settings.find(ctx->id("synth")) == ctx->settings.end()) {
             ArchArgs chipArgs = ctx->args;
-            ctx = std::unique_ptr<Context>(new Context(chipArgs));
-            Q_EMIT contextChanged(ctx.get());
+            std::unique_ptr<Context> new_ctx = std::unique_ptr<Context>(new Context(chipArgs));
+#ifdef ARCH_HIMBAECHEL
+            new_ctx->uarch->with_gui = true;
+            new_ctx->uarch->init(new_ctx.get());
+            new_ctx->late_init();
+#endif
+            Q_EMIT contextChanged(new_ctx.get());
+            ctx = std::move(new_ctx);
         }
         handler->load_json(ctx.get(), fileName.toStdString());
         Q_EMIT updateTreeView();

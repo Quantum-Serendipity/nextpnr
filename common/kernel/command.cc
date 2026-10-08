@@ -78,7 +78,10 @@ bool check_file_exists(std::string filename, bool is_exec)
 }
 #endif
 
-#if defined(__linux__) || defined(__CYGWIN__)
+#if defined(__linux__) || defined(__CYGWIN__) || defined(__GNU__)
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 std::string proc_self_dirname()
 {
     char path[PATH_MAX];
@@ -136,10 +139,10 @@ std::string proc_self_dirname()
     wbinpath.resize(wbinpath.rfind(L'\\') + 1); // remove filename
     std::string ubinpath;
     ubinpath.resize(WideCharToMultiByte(CP_UTF8, 0, wbinpath.data(), wbinpath.size(), NULL, 0, NULL, NULL));
-    if (WideCharToMultiByte(CP_UTF8, 0, wbinpath.data(), wbinpath.size(), &ubinpath[0], ubinpath.size(), NULL, NULL) == 0)
+    if (WideCharToMultiByte(CP_UTF8, 0, wbinpath.data(), wbinpath.size(), &ubinpath[0], ubinpath.size(), NULL, NULL) ==
+        0)
         fprintf(stderr, "WideCharToMultiByte() failed.\n");
     return ubinpath;
-
 }
 #elif defined(EMSCRIPTEN) || defined(__wasm)
 std::string proc_self_dirname() { return "/"; }
@@ -235,7 +238,7 @@ bool CommandHandler::parseOptions()
 #ifdef _WIN32
         int argc = 0;
         LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
-        std::vector<char*> uargs;
+        std::vector<char *> uargs;
         for (int i = 0; i < argc; i++) {
             int usize = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0, NULL, NULL);
             char *uarg = (char *)malloc(usize);
@@ -724,7 +727,8 @@ int CommandHandler::exec()
 {
 #ifdef _WIN32
     // Configure ASCII functions like fopen() to use UTF-8 filenames.
-    // See https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setlocale-wsetlocale?view=msvc-170#utf-8-support
+    // See
+    // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setlocale-wsetlocale?view=msvc-170#utf-8-support
 #ifdef _UCRT
     setlocale(LC_ALL, ".UTF-8");
 #endif

@@ -56,6 +56,11 @@ void GateMateImpl::route_clock()
         return (ctx->getBelBucketForCellType(port.cell->type) == id_CPE_FF) && port.port.in(id_CLK_INT);
     };
 
+    auto feeds_ram_or_iosel_clk_port = [&](PortRef &port) {
+        return (ctx->getBelBucketForCellType(port.cell->type).in(id_RAM_HALF, id_IOSEL)) &&
+               port.port.in(id_CLOCK1, id_CLOCK2, id_CLOCK3, id_CLOCK4);
+    };
+
     auto feeds_ddr_port = [&](NetInfo *net, PortRef &port) {
         return this->ddr_nets.find(net->name) != this->ddr_nets.end() && port.port == id_D0_10;
     };
@@ -69,17 +74,39 @@ void GateMateImpl::route_clock()
 
     auto reserve = [&](WireId wire, NetInfo *net) {
         for (auto pip : ctx->getPipsUphill(wire)) {
-            wire = ctx->getPipSrcWire(pip);
-            break;
+            WireId src = ctx->getPipSrcWire(pip);
+
+            if (ctx->debug) {
+                auto wire_name = "(uninitialized)";
+                if (src != WireId())
+                    wire_name = ctx->nameOfWire(src);
+                log_info("        reserving wire %s\n", wire_name);
+            }
+            reserved_wires.insert({src, net->name});
+
+            int next_count = 0;
+            for (auto pip : ctx->getPipsUphill(src)) {
+                src = ctx->getPipSrcWire(pip);
+                ++next_count;
+            }
+            if (next_count == 1) {
+                // If one layer above we still only have one choice of pip, reserve it too
+                if (ctx->debug) {
+                    auto wire_name = "(uninitialized)";
+                    if (src != WireId())
+                        wire_name = ctx->nameOfWire(src);
+                    log_info("        reserving wire %s\n", wire_name);
+                }
+                reserved_wires.insert({src, net->name});
+            }
         }
-        if (ctx->debug) {
-            auto wire_name = "(uninitialized)";
-            if (wire != WireId())
-                wire_name = ctx->nameOfWire(wire);
-            log_info("        reserving wire %s\n", wire_name);
-        }
-        reserved_wires.insert({wire, net->name});
     };
+
+    auto occupied_tiles = std::vector<bool>(ctx->getGridDimX() * ctx->getGridDimY(), false);
+    for (auto &cell : ctx->cells) {
+        if (cell.second->bel != BelId())
+            occupied_tiles.at(cell.second->bel.tile) = true;
+    }
 
     for (auto &net_pair : ctx->nets) {
         NetInfo *net = net_pair.second.get();
@@ -103,6 +130,7 @@ void GateMateImpl::route_clock()
                     }
                 };
 
+                reserve_port_if_needed(id_EN_INT);
                 reserve_port_if_needed(id_EN);
                 reserve_port_if_needed(id_SR);
             }
@@ -120,7 +148,7 @@ void GateMateImpl::route_clock()
         auto sink_wires = dict<WireId, PortRef>{};
         auto sink_wires_to_do = pool<WireId>{};
         for (auto &usr : clk_net->users) {
-            if (!feeds_clk_port(usr) && !feeds_ddr_port(clk_net, usr))
+            if (!feeds_clk_port(usr) && !feeds_ddr_port(clk_net, usr) && !feeds_ram_or_iosel_clk_port(usr))
                 continue;
 
             auto sink_wire = ctx->getNetinfoSinkWire(clk_net, usr, 0);
@@ -158,6 +186,10 @@ void GateMateImpl::route_clock()
                     if (!(extra_data.resource == PipMask::C_CY2_I && extra_data.value == 0))
                         continue;
                 }
+                // Only bridge through CPEs that are completely free
+                if (extra_data.type == PipExtra::PIP_EXTRA_MUX && (extra_data.flags & MUX_ROUTING) &&
+                    occupied_tiles.at(dh.tile))
+                    continue;
                 if (!ctx->checkPipAvailForNet(dh, clk_net))
                     continue;
                 WireId dst = ctx->getPipDstWire(dh);

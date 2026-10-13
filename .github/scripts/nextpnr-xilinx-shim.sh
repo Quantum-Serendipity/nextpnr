@@ -11,6 +11,10 @@
 set -euo pipefail
 
 BIN="nextpnr-himbaechel"
+SIBLING="$(dirname "$(readlink -f "$0")")/nextpnr-himbaechel"
+if [ -x "$SIBLING" ]; then
+    BIN="$SIBLING"
+fi
 if [ -n "${NEXTPNR_HIMBAECHEL_BIN:-}" ]; then
     BIN="$NEXTPNR_HIMBAECHEL_BIN"
 fi

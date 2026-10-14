@@ -1446,14 +1446,21 @@ struct FasmBackend
             // left-hand block above is the mirror of this one, but the two
             // tile types do not share a feature vocabulary: RIOB18 has no
             // IBUF_HP_BANK_GLUE, no STEPDOWN and no wide
-            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.  The set below
-            // is what a reference bitstream sets for an LVCMOS18 input on
-            // bank 38, including the partner half's slew and pulldown.
-            bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
+            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.
+            //
+            // The enable and IN_ONLY are written below, for either half, as
+            // LVCMOS12_LVCMOS15_LVCMOS18.IN and
+            // LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY: the
+            // names a Vivado bitstream for such an input decodes to on zynq7.
+            // This block wrote LVCMOS12_LVCMOS15.IN and
+            // LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY on top.  The
+            // zynq7 database has neither for RIOB18, so an input on IOB_Y0 of
+            // a z030/z045/z100 HP bank did not assemble; and kintex7's short
+            // .IN also clears 39_01, IOB_Y1's enable, so neither did a tile
+            // whose IOB_Y1 receives too.
+            const bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
             if (is_right_hp_single_ended_input_master) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("LVCMOS12_LVCMOS15.IN");
-                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
 
                 std::string saved = fasm_ctx.back();
                 fasm_ctx.back() = "IOB_Y1";

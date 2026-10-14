@@ -36,7 +36,7 @@ permissions:
 env:
   # The database the chipdbs are generated from, and the demo-projects commit
   # carrying the cases.  Pinned, because the chipdb decides what the cases do.
-  PRJXRAY_DB_REV: c61742dca80cfbc73b0ce6a865d53f23b172525c
+  PRJXRAY_DB_REV: b12466df16ecb6fe194fe436ec020ac08d32d61e
   DEMO_PROJECTS_REV: e7429b5635ff77de9452aa31aef2462285691397
 
 jobs:

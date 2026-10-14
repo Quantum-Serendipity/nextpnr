@@ -44,4 +44,16 @@ no `IBUF_HP_BANK_GLUE`, no `STEPDOWN`, no wide `…LVTTL_SSTL135_SSTL15`
 slew alias -- so it needed its own block rather than a widened `LIOB18`
 one.  That tile now matches the reference line for line.
 
+Later measurement on zynq7 and kintex7 (Vivado 2026.1, every combination
+of the two halves of one RIOB18 tile) narrowed that block: Vivado's
+bitstream for an IOB_Y0 input decodes to the long names only
+(`LVCMOS12_LVCMOS15_LVCMOS18.IN` and
+`LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY`), which the
+common code already writes, so the two short aliases above are no longer
+emitted; zynq7's database has only the long names, and in kintex7 the
+short `.IN` clears IOB_Y1's enable.  The partner half's slew and
+`PULLTYPE.PULLDOWN` are written only when that half is unused.  The HP
+drive strengths got their own rows at the same time
+(`<STD>.DRIVE.I<mA>`, prjxray-db#36).
+
 Not hardware-verified.

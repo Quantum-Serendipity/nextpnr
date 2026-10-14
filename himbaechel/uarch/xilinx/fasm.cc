@@ -1246,8 +1246,21 @@ struct FasmBackend
                 log_error("high performance banks (RIOB18) do not support IO standard %s\n", iostandard.c_str());
 
             bool is_lvcmos15_or_18 = iostandard == "LVCMOS18" || iostandard == "LVCMOS15";
+            // On a right-hand HP bank each drive strength of LVCMOS12, LVCMOS15
+            // and LVCMOS18 is a code of its own over thirteen bits per half,
+            // and its row is <standard>.DRIVE.I<mA>.  The grouped rows below
+            // cover only part of those bits.  The LVCMOS15_LVCMOS18 one is
+            // LVCMOS18 at 12 mA exactly, so every other LVCMOS18 strength and
+            // every LVCMOS15 one came out as that one; the LVCMOS12 one is
+            // none of its four.  Measured on Vivado bitstreams of every
+            // strength, with the same codes on z030, z100 and k160.  Virtex-7
+            // keeps the old rows: the 485T is outside the Vivado licence these
+            // were measured with.
+            const bool drive_has_own_row = is_riob18 && !is_sing && is_low_volt_lvcmos && !device_is_virtex7();
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
+            else if (drive_has_own_row)
+                write_bit(iostandard + ".DRIVE.I" + std::to_string(drive));
             else if (is_hp_bank) {
                 if (is_lvcmos15_or_18) {
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");

@@ -3041,6 +3041,11 @@ struct FasmBackend
         if (sel_mask == "ROUNDING_MODE2")
             write_bit("SEL_MASK_ROUNDING_MODE2");
 
+        const std::string sel_pattern = str_or_default(ci->params, ctx->id("SEL_PATTERN"), "PATTERN");
+        const bool sel_pattern_is_c = sel_pattern == "C";
+        if (sel_pattern_is_c)
+            write_bit("SEL_PATTERN_C");
+
         // ZADREG means ADREG is off. Vivado also sets it when USE_DPORT is
         // false, whatever ADREG says: the pre-adder is unused, so that
         // pipeline register stays off. The fuzzer only tags the bit while

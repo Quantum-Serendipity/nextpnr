@@ -3027,7 +3027,9 @@ struct FasmBackend
             write_bit("USE_DPORT[0]");
 
         auto use_simd = str_or_default(ci->params, ctx->id("USE_SIMD"), "ONE48");
-        if (use_simd == "TWO24")
+        // FOUR12 needs both features: USE_SIMD_FOUR12 cuts at 12 and 36,
+        // USE_SIMD_FOUR12_TWO24 cuts at 24 (shared with TWO24)
+        if (use_simd == "TWO24" || use_simd == "FOUR12")
             write_bit("USE_SIMD_FOUR12_TWO24");
         if (use_simd == "FOUR12")
             write_bit("USE_SIMD_FOUR12");

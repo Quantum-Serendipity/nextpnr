@@ -1462,11 +1462,17 @@ struct FasmBackend
             if (is_right_hp_single_ended_input_master) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
 
-                std::string saved = fasm_ctx.back();
-                fasm_ctx.back() = "IOB_Y1";
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("PULLTYPE.PULLDOWN");
-                fasm_ctx.back() = saved;
+                // The partner half, when nothing is bound to it, takes the
+                // bank's slew and is pulled down.  A partner in use describes
+                // itself, and its own PULLTYPE contradicts the pulldown.
+                const bool describe_unused_partner = partner_pad_unused();
+                if (describe_unused_partner) {
+                    std::string saved = fasm_ctx.back();
+                    fasm_ctx.back() = "IOB_Y1";
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    write_bit("PULLTYPE.PULLDOWN");
+                    fasm_ctx.back() = saved;
+                }
             }
             if (!is_diff) {
                 if (iostandard == "LVCMOS33" || iostandard == "LVTTL" || iostandard == "LVCMOS25") {

@@ -1265,8 +1265,21 @@ struct FasmBackend
                 log_error("high performance banks (RIOB18) do not support IO standard %s\n", iostandard.c_str());
 
             bool is_lvcmos15_or_18 = iostandard == "LVCMOS18" || iostandard == "LVCMOS15";
+            // On a right-hand HP bank each drive strength of LVCMOS12, LVCMOS15
+            // and LVCMOS18 is a code of its own over thirteen bits per half,
+            // and its row is <standard>.DRIVE.I<mA>.  The grouped rows below
+            // cover only part of those bits.  The LVCMOS15_LVCMOS18 one is
+            // LVCMOS18 at 12 mA exactly, so every other LVCMOS18 strength and
+            // every LVCMOS15 one came out as that one; the LVCMOS12 one is
+            // none of its four.  Measured on Vivado bitstreams of every
+            // strength, with the same codes on z030, z100 and k160.  Virtex-7
+            // keeps the old rows: the 485T is outside the Vivado licence these
+            // were measured with.
+            const bool drive_has_own_row = is_riob18 && !is_sing && is_low_volt_lvcmos && !device_is_virtex7();
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
+            else if (drive_has_own_row)
+                write_bit(iostandard + ".DRIVE.I" + std::to_string(drive));
             else if (is_hp_bank) {
                 if (is_lvcmos15_or_18) {
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");
@@ -1465,20 +1478,33 @@ struct FasmBackend
             // left-hand block above is the mirror of this one, but the two
             // tile types do not share a feature vocabulary: RIOB18 has no
             // IBUF_HP_BANK_GLUE, no STEPDOWN and no wide
-            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.  The set below
-            // is what a reference bitstream sets for an LVCMOS18 input on
-            // bank 38, including the partner half's slew and pulldown.
-            bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
+            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.
+            //
+            // The enable and IN_ONLY are written below, for either half, as
+            // LVCMOS12_LVCMOS15_LVCMOS18.IN and
+            // LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY: the
+            // names a Vivado bitstream for such an input decodes to on zynq7.
+            // This block wrote LVCMOS12_LVCMOS15.IN and
+            // LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY on top.  The
+            // zynq7 database has neither for RIOB18, so an input on IOB_Y0 of
+            // a z030/z045/z100 HP bank did not assemble; and kintex7's short
+            // .IN also clears 39_01, IOB_Y1's enable, so neither did a tile
+            // whose IOB_Y1 receives too.
+            const bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
             if (is_right_hp_single_ended_input_master) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("LVCMOS12_LVCMOS15.IN");
-                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
 
-                std::string saved = fasm_ctx.back();
-                fasm_ctx.back() = "IOB_Y1";
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("PULLTYPE.PULLDOWN");
-                fasm_ctx.back() = saved;
+                // The partner half, when nothing is bound to it, takes the
+                // bank's slew and is pulled down.  A partner in use describes
+                // itself, and its own PULLTYPE contradicts the pulldown.
+                const bool describe_unused_partner = partner_pad_unused();
+                if (describe_unused_partner) {
+                    std::string saved = fasm_ctx.back();
+                    fasm_ctx.back() = "IOB_Y1";
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    write_bit("PULLTYPE.PULLDOWN");
+                    fasm_ctx.back() = saved;
+                }
             }
             if (!is_diff) {
                 if (iostandard == "LVCMOS33" || iostandard == "LVTTL" || iostandard == "LVCMOS25") {

@@ -454,6 +454,26 @@ jobs:
             die: xc7vx485t
             timeout: 300
 
+          # A CDC 6000 processor (60-bit, dual issue) running the 1972 Zurich
+          # Pascal compiler, which compiles itself on the board -- this netlist,
+          # through this flow, did so over NFS and from its block-RAM disk, with
+          # output byte-identical to the host's.  Here for the block RAM: 376
+          # RAMB36 with contents (a 60-bit core memory and a 1 MB disk), the
+          # most in the gate.  Its flags are the ones the board build used;
+          # congestion spreading and timing-driven rip-up measured better on
+          # it than the gate default.  About 80 minutes of P&R on a desktop.
+          - name: vc707-cdc6000
+            tier: stretch
+            source: netlist
+            design: vc707-cdc6000
+            netlist: vc707_cdc_sb.json.gz
+            xdc: vc707_cdc_sb.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 300
+            pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --tmg-ripup
+
           - name: vc707-litex-linux
             tier: stretch
             source: netlist
@@ -517,8 +537,8 @@ jobs:
           # flow reached 75.59, which places, routes, assembles and configures
           # with DONE asserted and then miscomputes on hardware.  A measured
           # delay matrix and a higher placer timing weight take it to 106.50
-          # MHz; this entry pins both so the fix cannot quietly rot.  It is the
-          # only entry that overrides PNR_PLACER_FLAGS, and the only one whose
+          # MHz; this entry pins both so the fix cannot quietly rot.  It was the
+          # first entry to override PNR_PLACER_FLAGS, and is the only one whose
           # interest is Fmax rather than completion.  See its README.
           - name: vc707-litex-linux-1gb
             tier: stretch

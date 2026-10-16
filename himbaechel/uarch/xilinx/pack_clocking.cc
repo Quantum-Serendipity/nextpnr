@@ -814,10 +814,33 @@ void XilinxPacker::generate_constraints()
                          MHz(period_in));
                 double period_in_div = period_in * int_or_default(ci->params, id_DIVCLK_DIVIDE, 1);
 
+                // The feedback net is normally driven by the PLL itself, but
+                // Vivado's clocking wizard always puts a global buffer between
+                // CLKFBOUT and CLKFBIN (BUFG clkf_buf), so follow clock buffers
+                // back to the PLL's own output port instead of assuming a direct
+                // connection: without this the whole PLL is skipped and the
+                // design is timed at the default frequency.
                 const NetInfo *clkfb = ci->getPort(id_CLKFBIN);
-                if (!clkfb || clkfb->driver.cell != ci)
+                if (clkfb == nullptr || clkfb->driver.cell == nullptr)
                     continue;
-                const std::string &clkfb_port = clkfb->driver.port.str(ctx);
+                CellInfo *fb_driver = clkfb->driver.cell;
+                IdString fb_port = clkfb->driver.port;
+                for (int hop = 0; fb_driver != ci && hop < 8; hop++) {
+                    if (!fb_driver->type.in(id_BUFGCTRL, id_BUFG, id_BUFG_BUFG, id_BUFH, id_BUFHCE, id_BUFHCE_BUFHCE,
+                                            id_BUFIO, id_BUFIO_BUFIO, id_BUFMRCE))
+                        break;
+                    NetInfo *upstream =
+                            fb_driver->ports.count(id_I0) ? fb_driver->getPort(id_I0) : fb_driver->getPort(id_I);
+                    if (upstream == nullptr && fb_driver->ports.count(id_I1))
+                        upstream = fb_driver->getPort(id_I1);
+                    if (upstream == nullptr || upstream->driver.cell == nullptr)
+                        break;
+                    fb_driver = upstream->driver.cell;
+                    fb_port = upstream->driver.port;
+                }
+                if (fb_driver != ci)
+                    continue;
+                const std::string &clkfb_port = fb_port.str(ctx);
                 double feedback_div = 0;
                 if (clkfb_port == "CLKFBOUT") {
                     feedback_div = float_or_default(

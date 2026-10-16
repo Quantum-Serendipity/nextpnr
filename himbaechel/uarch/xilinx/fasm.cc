@@ -3330,13 +3330,41 @@ struct FasmBackend
                          int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3), 2);
         pop(2);
     }
+    // ENABLE_DRP of a COMMON follows the DRP of the channels of its quad,
+    // not its own DRP: Vivado sets it when a channel of the quad drives DRPWE,
+    // and leaves it clear for a COMMON whose DRP is in use with idle channels,
+    // and for a channel that drives only DRPCLK, DRPEN or the address and
+    // data.  Xilinx numbers the sites of a quad per column: COMMON X<n>Y<q>,
+    // channels X<n>Y<4q> to Y<4q+3>.
+    bool quad_channel_drp_write_used(const CellInfo *common)
+    {
+        const SiteIndex common_site = uarch->get_bel_site(common->bel);
+        const auto &common_site_data = uarch->tile_extra_data(common_site.tile)->sites[common_site.site];
+        const IdString drpwe = ctx->id("DRPWE");
+        for (auto &cell : ctx->cells) {
+            CellInfo *ch = cell.second.get();
+            const bool is_placed_channel = ch->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL) && ch->bel != BelId();
+            if (!is_placed_channel)
+                continue;
+            const SiteIndex ch_site = uarch->get_bel_site(ch->bel);
+            const auto &ch_site_data = uarch->tile_extra_data(ch_site.tile)->sites[ch_site.site];
+            const NetInfo *we = ch->getPort(drpwe);
+            const bool drives_drpwe_in_this_quad = ch_site_data.site_x == common_site_data.site_x &&
+                                                   ch_site_data.site_y / 4 == common_site_data.site_y &&
+                                                   we != nullptr && we->driver.cell != nullptr &&
+                                                   !we->driver.cell->type.in(id_PSEUDO_GND, id_PSEUDO_VCC);
+            if (drives_drpwe_in_this_quad)
+                return true;
+        }
+        return false;
+    }
     void write_gtp_pll(CellInfo *ci)
     {
         push(uarch->tile_name(ci->bel.tile));
 
         push("GTPE2_COMMON");
         write_bit("IN_USE");
-        write_bit("ENABLE_DRP", bool_or_default(ci->params, ctx->id("_DRPCLK_USED"), false));
+        write_bit("ENABLE_DRP", quad_channel_drp_write_used(ci));
         write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
@@ -4014,7 +4042,7 @@ struct FasmBackend
 
         push("GTXE2_COMMON");
         write_bit("IN_USE");
-        write_bit("ENABLE_DRP", bool_or_default(ci->params, ctx->id("_DRPCLK_USED"), false));
+        write_bit("ENABLE_DRP", quad_channel_drp_write_used(ci));
         write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));

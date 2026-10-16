@@ -3937,7 +3937,11 @@ struct FasmBackend
             log_error("TXPI_PPMCLK_SEL may only have values 'TXUSRCLK2' or 'TXUSRCLK' but is: '%s'\n", txpi_ppmclk_sel.c_str());
         write_bit("TXPI_PPMCLK_SEL.TXUSRCLK2", txpi_ppmclk_sel == "TXUSRCLK2");
         auto txpi_synfreq_ppm = int_or_default(ci->params, ctx->id("TXPI_SYNFREQ_PPM"), 0);
-        if (txpi_synfreq_ppm == 0) log_error("TXPI_SYNFREQ_PPM must not be zero!\n");
+        // A 3-bit attribute whose default is 0 (unisim); Vivado builds 0 with the
+        // three bits clear.
+        const bool invalid_txpi_synfreq_ppm = txpi_synfreq_ppm < 0 || txpi_synfreq_ppm > 7;
+        if (invalid_txpi_synfreq_ppm)
+            log_error("TXPI_SYNFREQ_PPM may only have values from 0 to 7 but is: %d\n", txpi_synfreq_ppm);
         write_int_vector("TXPI_SYNFREQ_PPM[2:0]", txpi_synfreq_ppm, 3);
         auto txpi_cfg0 = int_or_default(ci->params, ctx->id("TXPI_CFG0"), 0);
         write_int_vector("TXPI_CFG0[1:0]", txpi_cfg0, 2);

@@ -613,6 +613,42 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
     return true;
 }
 
+// Validity is decided for the whole tile, so the bel a check stops at can be an empty one.  Name the
+// cells instead: those without any one of which the tile would be legal, or all of them when no single
+// cell is to blame.
+void XilinxImpl::explain_invalid_logic_tile(BelId bel) const
+{
+    const LogicTileStatus &lts = *tile_status.at(bel.tile).lts;
+    std::vector<CellInfo *> cells, culprits;
+    for (CellInfo *ci : lts.cells) {
+        const bool slot_is_used = ci != nullptr;
+        if (slot_is_used)
+            cells.push_back(ci);
+    }
+    for (CellInfo *ci : cells) {
+        LogicTileStatus without = lts;
+        for (auto &slot : without.cells) {
+            const bool slot_holds_this_cell = slot == ci;
+            if (slot_holds_this_cell)
+                slot = nullptr;
+        }
+        for (auto &eight : without.eights)
+            eight.dirty = true;
+        for (auto &half : without.halfs)
+            half.dirty = true;
+        const bool tile_is_legal_without_it = xc7_logic_tile_valid(bel_tile_type(bel), without);
+        if (tile_is_legal_without_it)
+            culprits.push_back(ci);
+    }
+    const bool no_single_cell_is_to_blame = culprits.empty();
+    if (no_single_cell_is_to_blame)
+        culprits = cells;
+    std::string names;
+    for (CellInfo *ci : culprits)
+        names += stringf("%s'%s' (%s)", names.empty() ? "" : ", ", ctx->nameOf(ci), ctx->nameOfBel(ci->bel));
+    log_nonfatal_error("illegal placement in logic tile %s: %s\n", ctx->getBelName(bel)[0].c_str(ctx), names.c_str());
+}
+
 bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
     const bool tile_is_closed_to_new_cells = !frozen_tiles.empty() && frozen_tiles.count(bel.tile) != 0;
@@ -644,7 +680,11 @@ bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
     if (is_logic_tile(bel)) {
         if (!tile_status.at(bel.tile).lts)
             return true;
-        return xc7_logic_tile_valid(bel_tile_type(bel), *tile_status.at(bel.tile).lts);
+        const bool tile_is_valid = xc7_logic_tile_valid(bel_tile_type(bel), *tile_status.at(bel.tile).lts);
+        const bool explain_the_illegal_tile = !tile_is_valid && explain_invalid;
+        if (explain_the_illegal_tile)
+            explain_invalid_logic_tile(bel);
+        return tile_is_valid;
     } else if (is_bram_tile(bel)) {
         const auto &bts = tile_status.at(bel.tile).bts;
         if (!bts)

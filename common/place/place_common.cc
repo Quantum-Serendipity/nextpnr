@@ -295,6 +295,17 @@ class ConstraintLegaliseWorker
                             }
                         }
                     }
+                    // The chain itself can be what the architecture rejects there, with no other cell
+                    // left to rip up (xilinx: a LUT on the 5LUT and its flipflop on the 5FF, when the LUT
+                    // output and the flipflop output both need the one output mux of the position).
+                    // Take it off again and keep searching; the cells it displaced stay ripped up and are
+                    // placed again with the others.
+                    const bool chain_is_illegal_here = !chain_is_valid(solution);
+                    if (chain_is_illegal_here) {
+                        for (auto cp : solution)
+                            ctx->unbindBel(ctx->getBelByLocation(cp.second));
+                        continue;
+                    }
                     NPNR_ASSERT(constraints_satisfied(cell));
                     return true;
                 }
@@ -306,6 +317,17 @@ class ConstraintLegaliseWorker
 
     // Check if constraints are currently satisfied on a cell and its children
     bool constraints_satisfied(const CellInfo *cell) { return get_constraints_distance(ctx, cell) == 0; }
+
+    // Check that every cell of a placed chain is on a bel the architecture accepts
+    bool chain_is_valid(const CellLocations &solution)
+    {
+        for (auto cp : solution) {
+            const bool cell_is_illegal_here = !ctx->isBelLocationValid(ctx->getBelByLocation(cp.second));
+            if (cell_is_illegal_here)
+                return false;
+        }
+        return true;
+    }
 
     // Placing a single cell
     bool place_single_cell(CellInfo *cell)

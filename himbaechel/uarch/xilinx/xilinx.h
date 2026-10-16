@@ -148,6 +148,9 @@ struct XilinxImpl : HimbaechelAPI
 
     bool isBelLocationValid(BelId bel, bool explain_invalid = false) const override;
     bool xc7_logic_tile_valid(IdString tileType, const LogicTileStatus &lts) const;
+    void explain_invalid_logic_tile(BelId bel) const;
+    // A tile is explained once: the final check of the placer asks every bel of it in turn
+    mutable pool<int> explained_tiles;
 
     // Clusters: a RAMB36E1 cascade chain is placed bel by bel along the
     // chipdb's CASCADEOUT -> CASCADEIN wires; everything else is BaseArch's.

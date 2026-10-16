@@ -618,6 +618,11 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
 // cell is to blame.
 void XilinxImpl::explain_invalid_logic_tile(BelId bel) const
 {
+    // Validity is per tile and the caller asks per bel: say it once per tile.
+    const bool tile_already_explained = explained_tiles.count(bel.tile) != 0;
+    if (tile_already_explained)
+        return;
+    explained_tiles.insert(bel.tile);
     const LogicTileStatus &lts = *tile_status.at(bel.tile).lts;
     std::vector<CellInfo *> cells, culprits;
     for (CellInfo *ci : lts.cells) {
@@ -646,7 +651,14 @@ void XilinxImpl::explain_invalid_logic_tile(BelId bel) const
     std::string names;
     for (CellInfo *ci : culprits)
         names += stringf("%s'%s' (%s)", names.empty() ? "" : ", ", ctx->nameOf(ci), ctx->nameOfBel(ci->bel));
-    log_nonfatal_error("illegal placement in logic tile %s: %s\n", ctx->getBelName(bel)[0].c_str(ctx), names.c_str());
+    // Under --force the placer goes on after a failed check and only warns; a
+    // nonfatal error here would still make the run exit with 1.
+    const bool the_run_goes_on = ctx->force;
+    if (the_run_goes_on)
+        log_warning("illegal placement in logic tile %s: %s\n", ctx->getBelName(bel)[0].c_str(ctx), names.c_str());
+    else
+        log_nonfatal_error("illegal placement in logic tile %s: %s\n", ctx->getBelName(bel)[0].c_str(ctx),
+                           names.c_str());
 }
 
 bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const

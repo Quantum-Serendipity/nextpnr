@@ -3354,13 +3354,14 @@ struct FasmBackend
         auto common_cfg = int_or_default(ci->params, ctx->id("COMMON_CFG"), 0);
         write_int_vector("COMMON_CFG[31:0]", common_cfg, 32);
 
-        // according to ug482, these attributes contain magic undocumented and reserved wizard values
-        write_int_vector("PLL0_CFG[20:0]", 0b111110000001111011100, 21);
-        write_int_vector("PLL1_CFG[20:0]", 0b111110000001111011100, 21);
-        write_int_vector("PLL0_INIT_CFG[4:0]", 0b11110, 5);
-        write_int_vector("PLL1_INIT_CFG[4:0]", 0b11110, 5);
-        write_int_vector("PLL0_LOCK_CFG[8:0]", 0b111101000, 9);
-        write_int_vector("PLL1_LOCK_CFG[8:0]", 0b111101000, 9);
+        // according to ug482, these attributes contain magic undocumented and reserved wizard values.
+        // Vivado writes the instance's value (PCIe asks PLL*_CFG = 0x1F024C); the defaults are unisim's.
+        write_int_vector("PLL0_CFG[26:0]", int_or_default(ci->params, ctx->id("PLL0_CFG"), 0x01F03DC), 27);
+        write_int_vector("PLL1_CFG[26:0]", int_or_default(ci->params, ctx->id("PLL1_CFG"), 0x01F03DC), 27);
+        write_int_vector("PLL0_INIT_CFG[23:0]", int_or_default(ci->params, ctx->id("PLL0_INIT_CFG"), 0x00001E), 24);
+        write_int_vector("PLL1_INIT_CFG[23:0]", int_or_default(ci->params, ctx->id("PLL1_INIT_CFG"), 0x00001E), 24);
+        write_int_vector("PLL0_LOCK_CFG[8:0]", int_or_default(ci->params, ctx->id("PLL0_LOCK_CFG"), 0x1E8), 9);
+        write_int_vector("PLL1_LOCK_CFG[8:0]", int_or_default(ci->params, ctx->id("PLL1_LOCK_CFG"), 0x1E8), 9);
 
         auto pll0_refclk_div = int_or_default(ci->params, ctx->id("PLL0_REFCLK_DIV"), 1);
         bool invalid_pll0_refclk_div = pll0_refclk_div < 1 || pll0_refclk_div > 2;

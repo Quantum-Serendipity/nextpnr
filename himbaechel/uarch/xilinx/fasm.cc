@@ -3248,8 +3248,41 @@ struct FasmBackend
         push(tile_name);
         Loc siteLoc = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
-        // IN_USE stays clear in Vivado for a placed buffer (Artix-7 GTP and
-        // Zynq-7000 GTX, either site, any CEB, pads connected or open).
+        // Vivado sets IN_USE only when the reference clock goes to a
+        // transceiver and nowhere else: O to GTREFCLK0/1 of the COMMON or of a
+        // channel of this quad, and neither O nor ODIV2 to a fabric clock
+        // buffer.  With a fabric load it stays clear, at any CEB (#97), and
+        // writing it there is what silenced the factory UART in #86.  pack_gt
+        // has already disconnected the hardwired GTREFCLK inputs and recorded
+        // them on the GT cells, so what is left on O and ODIV2 are the fabric
+        // loads.  Xilinx numbers the sites of a quad per column: COMMON
+        // X<n>Y<q>, IBUFDS_GTE2 X<n>Y<2q> and Y<2q+1>, channels X<n>Y<4q> to
+        // Y<4q+3>.
+        const SiteIndex buf_site = uarch->get_bel_site(ci->bel);
+        const auto &buf_site_data = uarch->tile_extra_data(buf_site.tile)->sites[buf_site.site];
+        const IdString refclk_used_attr = ctx->id(siteLoc.y == 0 ? "_GTREFCLK0_USED" : "_GTREFCLK1_USED");
+        bool drives_gt_refclk = false;
+        for (auto &cell : ctx->cells) {
+            const CellInfo *gt = cell.second.get();
+            const bool is_placed_gt =
+                    gt->type.in(id_GTPE2_COMMON, id_GTXE2_COMMON, id_GTPE2_CHANNEL, id_GTXE2_CHANNEL) &&
+                    gt->bel != BelId();
+            if (!is_placed_gt)
+                continue;
+            const SiteIndex gt_site = uarch->get_bel_site(gt->bel);
+            const auto &gt_site_data = uarch->tile_extra_data(gt_site.tile)->sites[gt_site.site];
+            const int gt_quad =
+                    gt->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL) ? gt_site_data.site_y / 4 : gt_site_data.site_y;
+            const bool takes_this_refclk = gt_site_data.site_x == buf_site_data.site_x &&
+                                           gt_quad == buf_site_data.site_y / 2 &&
+                                           bool_or_default(gt->params, refclk_used_attr, false);
+            if (takes_this_refclk)
+                drives_gt_refclk = true;
+        }
+        const NetInfo *o = ci->getPort(id_O);
+        const NetInfo *odiv2 = ci->getPort(ctx->id("ODIV2"));
+        const bool drives_fabric = (o != nullptr && !o->users.empty()) || (odiv2 != nullptr && !odiv2->users.empty());
+        write_bit("IN_USE", drives_gt_refclk && !drives_fabric);
         // CLKCM_CFG and CLKRCV_TRST are the bits that follow the site.
         // Xilinx sources write these as the STRINGS "TRUE"/"FALSE", which is
         // what the LiteEth PCS instantiates them with; bool_or_default wants a

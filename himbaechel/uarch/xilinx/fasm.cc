@@ -3081,7 +3081,10 @@ struct FasmBackend
         const bool adreg_on = bool_or_default(ci->params, ctx->id("ADREG"), true);
         const bool zadreg_off = !use_dport || !adreg_on;
         write_bit("ZADREG[0]", zadreg_off);
-        write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG")));
+        // The pipeline registers a DSP48E1 does not name are on: UG479 gives every
+        // *REG attribute the default 1, and Vivado builds that.  yosys writes them
+        // out when it infers the DSP, so only an instantiated one leaves them unset.
+        write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
         // prjxray's AREG_2_ACASCREG_1 is the conjunction AREG == 2 && ACASCREG == 1
         // (fuzzers/100-dsp-mskpat/generate.py), not ACASCREG: its Z bit is set
         // unless both hold.  Vivado agrees -- it clears the bit only for AREG=2
@@ -3090,20 +3093,20 @@ struct FasmBackend
         auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
         write_bit("ZAREG_2_ACASCREG_1", !(areg == 2 && acascreg == 1));
         write_bit("ZBREG_2_BCASCREG_1", !(breg == 2 && bcascreg == 1));
-        write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG")));
-        write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG")));
+        write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG"), true));
+        write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG"), true));
         write_bit("ZCREG[0]", !bool_or_default(ci->params, ctx->id("CREG"), true));
         // Same rule as ZADREG, for the D input register.
         const bool dreg_on = bool_or_default(ci->params, ctx->id("DREG"), true);
         const bool zdreg_off = !use_dport || !dreg_on;
         write_bit("ZDREG[0]", zdreg_off);
-        write_bit("ZINMODEREG[0]", !bool_or_default(ci->params, ctx->id("INMODEREG")));
+        write_bit("ZINMODEREG[0]", !bool_or_default(ci->params, ctx->id("INMODEREG"), true));
         write_bus_zinv("ALUMODE", 4);
         write_bus_zinv("INMODE", 5);
         write_bus_zinv("OPMODE", 7);
-        write_bit("ZMREG[0]", !bool_or_default(ci->params, ctx->id("MREG")));
-        write_bit("ZOPMODEREG[0]", !bool_or_default(ci->params, ctx->id("OPMODEREG")));
-        write_bit("ZPREG[0]", !bool_or_default(ci->params, ctx->id("PREG")));
+        write_bit("ZMREG[0]", !bool_or_default(ci->params, ctx->id("MREG"), true));
+        write_bit("ZOPMODEREG[0]", !bool_or_default(ci->params, ctx->id("OPMODEREG"), true));
+        write_bit("ZPREG[0]", !bool_or_default(ci->params, ctx->id("PREG"), true));
         write_bit("USE_DPORT[0]", boolstr_or_default(ci->params, ctx->id("USE_DPORT"), false));
         write_bit("ZIS_CLK_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED")));
         write_bit("ZIS_CARRYIN_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CARRYIN_INVERTED")));

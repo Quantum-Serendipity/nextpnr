@@ -17,6 +17,9 @@
 # proved, for a known reason, which is a different statement from "these two
 # netlists differ".  What a timeout prints is lvs_equiv's last progress line
 # and the last 15 lines of lvs.log: where the proof had got to, not a count.
+# The exception is an entry listed as blocked: it passes only at its recorded
+# count, so a run that never reaches a count -- the extraction failed, or no
+# summary within EQUIV_TIMEOUT -- fails (exit 1) instead of passing unchecked.
 #
 # EXPECT_BLOCKED names a known gap, and EXPECT_DIFFER the number of differ it
 # leaves, as measured.  A blocked entry must state that count: without it any
@@ -91,6 +94,11 @@ fi
 if ! "$TILEVERILOG" --fasm "$fasm" --db "$PRJXRAY_DB/$family" --device "$device" \
         --xdc "$xdc" --part "$part" --placement "$placement" --out "$d/fabric.v" \
         --model-out "$d/tile_model.v" >>"$log" 2>&1; then
+    if [ -n "${EXPECT_BLOCKED:-}" ]; then
+        echo "::error::$name: listed as blocked at $EXPECT_DIFFER differ (lvs_blocked_differ; blocked on: $EXPECT_BLOCKED), and that count was not checked -- extraction from the bitstream failed"
+        tail -15 "$log"
+        exit 1
+    fi
     echo "::notice::$name: blocked -- extraction from the bitstream failed"
     tail -15 "$log"
     exit 77
@@ -118,13 +126,19 @@ rc=$?
 # The kill can cut the last line short; end it, so that the step's own notice
 # after this starts a line and is still read as one.
 if [ $rc -eq 124 ] || [ -z "$res" ]; then
-    echo "::notice::$name: blocked -- not proved within ${EQUIV_TIMEOUT}s; the last 15 lines of lvs.log follow, they are not a count"
+    if [ -n "${EXPECT_BLOCKED:-}" ]; then
+        echo "::error::$name: listed as blocked at $EXPECT_DIFFER differ (lvs_blocked_differ; blocked on: $EXPECT_BLOCKED), and that count was not checked -- no summary from lvs_equiv within ${EQUIV_TIMEOUT}s; the last 15 lines of lvs.log follow, they are not a count"
+        status=1
+    else
+        echo "::notice::$name: blocked -- not proved within ${EQUIV_TIMEOUT}s; the last 15 lines of lvs.log follow, they are not a count"
+        status=77
+    fi
     progress=$(tail -n +"$((start + 1))" "$log" | grep -vE '^  (DIFFER|unknown|proved) |^[[:space:]]*$' | tail -1)
     [ -n "$progress" ] && echo "last progress line of lvs_equiv: $progress"
     echo "--- last 15 lines of lvs.log ---"
     tail -15 "$log"
     [ -n "$(tail -c 1 "$log")" ] && echo
-    exit 77
+    exit $status
 fi
 
 proved=$(echo "$res" | awk '{print $1}')

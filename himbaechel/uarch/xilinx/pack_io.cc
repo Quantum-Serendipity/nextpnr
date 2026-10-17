@@ -908,7 +908,11 @@ void XC7Packer::pack_iologic()
                 // OBUFDS has the negative pin connected to an inverter
                 if (no_users == 2 && user_type == "INVERTER")
                     continue;
-                if (boost::contains(user_type, "OUTBUF_EN") || boost::contains(user_type, "OUTBUF_DCIEN"))
+                // yosys emits a plain IOB33_OUTBUF (no tristate/DCI suffix) when
+                // an output's tristate is constant-enabled, and ODELAYE2's
+                // DATAOUT legitimately drives that shape as well as the
+                // OUTBUF_EN/OUTBUF_DCIEN ones.
+                if (boost::contains(user_type, "OUTBUF"))
                     io_bel = user->bel;
                 else
                     // TODO: support SIGNAL_PATTERN = CLOCK

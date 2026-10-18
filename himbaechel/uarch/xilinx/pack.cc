@@ -1132,16 +1132,29 @@ void XC7Packer::pack_bram()
                 if (write_width >= (9 * we_width))
                     continue;
                 int used_we_width = std::max(write_width / 9, 1);
-                for (int i = used_we_width; i < we_width; i++) {
-                    NetInfo *low_we = ci->getPort(ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") +
-                                                          std::to_string(i % used_we_width) + "]"));
-                    IdString curr_we = ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") + std::to_string(i) + "]");
-                    if (!ci->ports.count(curr_we)) {
+                std::string we_prefix = (port == 'B') ? "WEBWE[" : "WEA[";
+                // The byte enables in use, read before any of them is rewritten
+                std::vector<NetInfo *> used_we;
+                for (int i = 0; i < used_we_width; i++)
+                    used_we.push_back(ci->getPort(ctx->id(we_prefix + std::to_string(i) + "]")));
+                // Port B of an 18Kb block takes each byte enable on a pair of site pins, the way
+                // Vivado places them: in x18, WEBWE[0] on WEBWE0 and WEBWE1, WEBWE[1] on WEBWE2 and
+                // WEBWE3 (the pins are named after WEBWE[i] one to one). Port A gets its pairs from
+                // the WEA[0]/WEA[1] rules, and a 36Kb block repeats them (WE[i % used], also Vivado's).
+                const bool we_in_pairs = ci->type == id_RAMB18E1 && port == 'B';
+                for (int i = 0; i < we_width; i++) {
+                    int src = we_in_pairs ? (i * used_we_width / we_width) : (i % used_we_width);
+                    const bool already_there = (src == i);
+                    if (already_there)
+                        continue;
+                    IdString curr_we = ctx->id(we_prefix + std::to_string(i) + "]");
+                    const bool port_missing = !ci->ports.count(curr_we);
+                    if (port_missing) {
                         ci->ports[curr_we].type = PORT_IN;
                         ci->ports[curr_we].name = curr_we;
                     }
                     ci->disconnectPort(curr_we);
-                    ci->connectPort(curr_we, low_we);
+                    ci->connectPort(curr_we, used_we.at(src));
                 }
             }
         }

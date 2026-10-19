@@ -10,8 +10,11 @@ function get_dependencies {
     git clone https://github.com/openXC7/prjxray-db ${XRAY_DB_PATH}
     # Fetch apycula
     pip install --break-system-packages apycula
-    # Fetch prjpeppercorn
+    # Fetch prjpeppercorn, at the last revision of the database version the
+    # GateMate generator accepts (gen/arch_gen.py exits on anything but its
+    # EXPECTED_VERSION, 1.13; upstream moved to 1.14 on 2026-10-19)
     git clone https://github.com/YosysHQ/prjpeppercorn ${PEPPERCORN_PATH}
+    git -C ${PEPPERCORN_PATH} checkout b1eb52f4
 }
 
 function build_nextpnr {

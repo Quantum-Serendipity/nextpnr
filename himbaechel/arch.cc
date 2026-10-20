@@ -208,7 +208,9 @@ void Arch::late_init()
 
 BelId Arch::getBelByName(IdStringList name) const
 {
-    NPNR_ASSERT(name.size() == 2);
+    const bool name_is_tile_bel = name.size() == 2;
+    if (!name_is_tile_bel)
+        log_error("Bel name '%s' is not of the form <tile>/<bel>\n", name.str(getCtx()).c_str());
     // A name that matches no tile must yield an empty BelId, not an
     // uncaught dict::at() -- the callers have a diagnostic for the empty
     // case (e.g. placer1.cc "No Bel named ... located for this chip")
@@ -351,7 +353,9 @@ void Arch::assignArchInfo()
 
 WireId Arch::getWireByName(IdStringList name) const
 {
-    NPNR_ASSERT(name.size() == 2);
+    const bool name_is_tile_wire = name.size() == 2;
+    if (!name_is_tile_wire)
+        log_error("Wire name '%s' is not of the form <tile>/<wire>\n", name.str(getCtx()).c_str());
     // Same guard as getBelByName: unknown tile means empty WireId, not an
     // uncaught dict::at().
     auto tile_it = tile_name2idx.find(name[0]);

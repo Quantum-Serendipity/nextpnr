@@ -735,7 +735,7 @@ void XilinxPacker::generate_constraints()
             if (!equals_epsilon_constr(*to->clkconstr, *constr) && user_constrained.count(to->name))
                 log_warning("    Overriding derived constraint of %.1f MHz on net %s with user-specified constraint of "
                             "%.1f MHz.\n",
-                            MHz(to->clkconstr->period.min_delay), to->name.c_str(ctx), MHz(constr->period.min_delay));
+                            MHz(constr->period.min_delay), to->name.c_str(ctx), MHz(to->clkconstr->period.min_delay));
             return;
         }
         to->clkconstr = std::move(constr);
@@ -756,8 +756,8 @@ void XilinxPacker::generate_constraints()
                 user_constrained.count(to->name))
                 log_warning("    Overriding derived constraint of %.1f MHz on net %s with user-specified constraint of "
                             "%.1f MHz.\n",
-                            MHz(to->clkconstr->period.minDelay()), to->name.c_str(ctx),
-                            MHz(delay_t(from->clkconstr->period.minDelay() / ratio)));
+                            MHz(delay_t(from->clkconstr->period.minDelay() / ratio)), to->name.c_str(ctx),
+                            MHz(to->clkconstr->period.minDelay()));
             return;
         }
         to->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint());

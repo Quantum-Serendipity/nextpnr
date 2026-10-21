@@ -1021,6 +1021,20 @@ void XilinxPacker::tie_port(CellInfo *ci, const std::string &port, bool value, b
         ci->params[ctx->idf("IS_%s_INVERTED", port.c_str())] = Property(1);
 }
 
+// Whether REGCLKB of a block RAM is left without a net: Vivado does so when
+// RAM_MODE says SDP, also on cells its DRC rejects, and the SDP transformation
+// in pack_bram() packs a cell as SDP when port B writes the full width (36
+// bits on a RAMB18E1, 72 on a RAMB36E1), with or without RAM_MODE.  The
+// transformation decides how the cell is packed; this decides whether REGCLKB
+// gets a net, so it looks at both.
+static bool bram_regclkb_without_net(const Context *ctx, const CellInfo *ci)
+{
+    const bool sdp_by_mode = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP") == "SDP";
+    const int full_width = (ci->type == id_RAMB36E1) ? 72 : 36;
+    const bool sdp_by_width = int_or_default(ci->params, id_WRITE_WIDTH_B, 0) == full_width;
+    return sdp_by_mode || sdp_by_width;
+}
+
 void XC7Packer::pack_bram()
 {
     log_info("Packing BRAM..\n");
@@ -1141,8 +1155,8 @@ void XC7Packer::pack_bram()
         };
         if (port_a_output_registered)
             connect_register_clock("REGCLKARDRCLK", id_CLKARDCLK);
-        const bool is_sdp = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP") == "SDP";
-        const bool regclkb_used = port_b_output_registered && !is_sdp;
+        const bool regclkb_without_net = bram_regclkb_without_net(ctx, ci);
+        const bool regclkb_used = port_b_output_registered && !regclkb_without_net;
         if (regclkb_used)
             connect_register_clock("REGCLKB", id_CLKBWRCLK);
     }

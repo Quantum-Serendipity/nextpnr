@@ -921,7 +921,15 @@ void XilinxImpl::configurePlacerHeap(PlacerHeapCfg &cfg)
 {
     cfg.hpwl_scale_x = 2;
     cfg.hpwl_scale_y = 1;
-    cfg.beta = 0.5;
+    // command.cc stores the generic HeAP default when --placer-heap-beta is
+    // absent, as the text std::to_string(0.9), so the setting is always
+    // present.  This arch wants 0.5 in that case.  Any other value came from
+    // the user and is kept.  An explicit 0.9 is the same text and gets 0.5
+    // as well.
+    const std::string beta_text = ctx->setting<std::string>("placerHeap/beta");
+    const bool beta_is_generic_default = beta_text == std::to_string(0.9);
+    if (beta_is_generic_default)
+        cfg.beta = 0.5;
     cfg.placeAllAtOnce = true;
     cfg.get_cell_legalisation_weight = [this](Context *, CellInfo *ci) {
         if (ci->type != id_SLICE_LUTX)

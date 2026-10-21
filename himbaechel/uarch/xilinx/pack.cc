@@ -1110,6 +1110,43 @@ void XC7Packer::pack_bram()
     log_info("BRAM cascade scan: %d BRAM(s), %d tie(s) seen, %d dropped\n", casc_bram, casc_seen,
              casc_dropped);
 
+    // The output registers (DOA_REG/DOB_REG) are clocked through site pins of
+    // their own, REGCLKARDRCLK and REGCLKB (L and U on a RAMB36), which the
+    // primitive has no port for.  prjxray feeds them from rows 4 and 0 of the
+    // INT tiles beside the BRAM (the data clocks use rows 3 and 1), so with
+    // nothing connected no clock reaches those rows and the register never
+    // loads: the output holds its initial value.  Vivado drives them from the
+    // port clocks: REGCLKARDRCLK from CLKARDCLK when DOA_REG is set, REGCLKB
+    // from CLKBWRCLK when DOB_REG is set, except in SDP, where the read word
+    // is registered from REGCLKARDRCLK and REGCLKB is left without a net.
+    // The logical names are mapped to the L/U bel pins by get_bram36_ul_pins.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_bram = ci->type.in(id_RAMB18E1, id_RAMB36E1);
+        if (!is_bram)
+            continue;
+        const bool port_a_output_registered = bool_or_default(ci->params, id_DOA_REG, false);
+        const bool port_b_output_registered = bool_or_default(ci->params, id_DOB_REG, false);
+        const bool no_output_register = !port_a_output_registered && !port_b_output_registered;
+        if (no_output_register)
+            continue;
+        auto connect_register_clock = [&](const char *regclk, IdString data_clock) {
+            NetInfo *clk = ci->getPort(data_clock);
+            const bool data_clock_unconnected = clk == nullptr;
+            if (data_clock_unconnected)
+                return;
+            IdString port = ctx->id(regclk);
+            ci->addInput(port);
+            ci->connectPort(port, clk);
+        };
+        if (port_a_output_registered)
+            connect_register_clock("REGCLKARDRCLK", id_CLKARDCLK);
+        const bool is_sdp = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP") == "SDP";
+        const bool regclkb_used = port_b_output_registered && !is_sdp;
+        if (regclkb_used)
+            connect_register_clock("REGCLKB", id_CLKBWRCLK);
+    }
+
     // Process SDP BRAM first
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();

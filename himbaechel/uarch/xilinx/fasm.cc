@@ -2480,17 +2480,24 @@ struct FasmBackend
                           !bool_or_default(ci->params, ctx->id("IS_" + invpin.str(ctx) + "_INVERTED"), false));
             // REGCLKARDRCLK and REGCLKB are SITE pins, not RAMB18E1/RAMB36E1
             // cell ports, so they are absent from invertible_pins.  prjxray's
-            // fuzzer rule: with DO*_REG == 1 the output-register clock FOLLOWS
-            // the corresponding data clock, with DO*_REG == 0 it is always
-            // inverted -- i.e. tag 0, the bit clear, which is what emitting
-            // nothing already gives.  So only the registered case needs
-            // anything written.  (Port of nextpnr-xilinx e71acda2.)
+            // fuzzer solved this only for a port narrower than 36 bits: with
+            // DO*_REG == 1 the output-register clock follows the corresponding
+            // data clock, and with DO*_REG == 0 it is always inverted (tag 0,
+            // the bit clear, which is what emitting nothing already gives).
+            // (Port of nextpnr-xilinx e71acda2.)
+            // A wide SDP read is outside that solve.  Vivado clocks both output
+            // registers from REGCLKARDRCLK and leaves REGCLKB unconnected, so
+            // ZINV_REGCLKB stays clear on both halves even when DOB_REG is 1.
+            // Applying the narrow-port rule there sets the bit.
             bool port_a_output_registered = bool_or_default(ci->params, ctx->id("DOA_REG"), false);
             bool port_b_output_registered = bool_or_default(ci->params, ctx->id("DOB_REG"), false);
             if (port_a_output_registered)
                 write_bit("ZINV_REGCLKARDRCLK",
                           !bool_or_default(ci->params, ctx->id("IS_CLKARDCLK_INVERTED"), false));
-            if (port_b_output_registered)
+            const std::string ram_mode = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP");
+            const bool sdp_leaves_regclkb_clear = ram_mode == "SDP";
+            const bool emit_regclkb_invert = port_b_output_registered && !sdp_leaves_regclkb_clear;
+            if (emit_regclkb_invert)
                 write_bit("ZINV_REGCLKB",
                           !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             for (auto wrmode : {"WRITE_MODE_A", "WRITE_MODE_B"}) {

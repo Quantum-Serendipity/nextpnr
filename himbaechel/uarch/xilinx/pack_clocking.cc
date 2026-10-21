@@ -202,6 +202,17 @@ void XC7Packer::bypass_pll_input_buffers()
                  removed);
 }
 
+// Vivado ties IGNORE1 of a BUFG or BUFGCE high: the unused I1 is never
+// waited for. pack_constants() has tied it low, to VCC through the site
+// inverter; clearing the inverter here, instead of tying the pin in
+// prepare_clocking(), keeps the users of the VCC net in their order, and with
+// them the routing of every design.
+void XC7Packer::raise_bufg_ignore1()
+{
+    for (CellInfo *ci : bufgs_ignoring_i1)
+        ci->params[id_IS_IGNORE1_INVERTED] = Property(0);
+}
+
 void XC7Packer::prepare_clocking()
 {
     log_info("Preparing clocking...\n");
@@ -222,14 +233,16 @@ void XC7Packer::prepare_clocking()
             tie_port(ci, "CE0", true, true);
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
-            tie_port(ci, "IGNORE0", true, true);
+            tie_port(ci, "IGNORE0", false, true);
+            bufgs_ignoring_i1.push_back(ci);
         } else if (ci->type == id_BUFGCE) {
             ci->type = id_BUFGCTRL;
             ci->renamePort(id_I, id_I0);
             ci->renamePort(id_CE, id_CE0);
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
-            tie_port(ci, "IGNORE0", true, true);
+            tie_port(ci, "IGNORE0", false, true);
+            bufgs_ignoring_i1.push_back(ci);
         } else if (is_horizontal_clock_buffer) {
             // BUFH is the legacy non-CE spelling; both map to the BUFHCE bel
             // with CE tied active (port of nextpnr-xilinx pack_clocking_xc7.cc)

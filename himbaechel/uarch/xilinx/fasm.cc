@@ -3049,10 +3049,14 @@ struct FasmBackend
             write_vector("PATTERN[47:0]", pattern_vector);
         }
 
+        // As prjxray's 100-dsp-mskpat fuzzer tags them: AUTORESET_PATDET_RESET
+        // for RESET_MATCH and RESET_NOT_MATCH, _RESET_NOT_MATCH for the second only.
         auto autoreset_patdet = str_or_default(ci->params, ctx->id("AUTORESET_PATDET"), "NO_RESET");
-        if (autoreset_patdet == "RESET_MATCH")
+        const bool autoreset_on_pattern = autoreset_patdet == "RESET_MATCH" || autoreset_patdet == "RESET_NOT_MATCH";
+        if (autoreset_on_pattern)
             write_bit("AUTORESET_PATDET_RESET");
-        if (autoreset_patdet == "RESET_NOT_MATCH")
+        const bool autoreset_on_not_match = autoreset_patdet == "RESET_NOT_MATCH";
+        if (autoreset_on_not_match)
             write_bit("AUTORESET_PATDET_RESET_NOT_MATCH");
 
         // MASK

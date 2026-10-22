@@ -1490,6 +1490,7 @@ void XilinxImpl::pack()
     packer.pack_io();
     packer.prepare_clocking();
     packer.pack_constants();
+    packer.raise_bufg_ignore1();
     packer.pack_iologic();
     packer.pack_idelayctrl();
     packer.pack_cfg();

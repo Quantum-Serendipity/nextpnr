@@ -373,6 +373,24 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
     }
 }
 
+// The fabric clock buffers an IBUFDS_GTE2 output can drive, through the
+// buffer's one wire to the fabric (MGTCLKOUT).  pack_io runs before
+// prepare_clocking(), so the users are still the primitives of the design:
+// BUFGCE, BUFGCTRL and the BUFGMUX family have not become BUFGCTRL yet.  The
+// BUFGMUX names have no constid, so the type is compared as a string, as
+// prepare_clocking() does; that interns no id.
+static const std::vector<std::string> ibufds_gte2_fabric_buffers{
+        "BUFG", "BUFGCE", "BUFGCTRL", "BUFGMUX", "BUFGMUX_1", "BUFGMUX_CTRL", "BUFH", "BUFHCE", "BUFR"};
+
+static bool is_ibufds_gte2_fabric_buffer(const Context *ctx, IdString type)
+{
+    const std::string &name = type.str(ctx);
+    return std::find(ibufds_gte2_fabric_buffers.begin(), ibufds_gte2_fabric_buffers.end(), name) !=
+           ibufds_gte2_fabric_buffers.end();
+}
+
+static std::string ibufds_gte2_fabric_buffer_list() { return boost::algorithm::join(ibufds_gte2_fabric_buffers, "/"); }
+
 void XC7Packer::pack_io()
 {
     log_info("Inserting IO buffers..\n");
@@ -479,7 +497,8 @@ void XC7Packer::pack_io()
                 log_error("IBUFDS_GTE2 instance %s has neither O nor ODIV2 connected\n", buf_cell->name.c_str(ctx));
             // Accepted silicon-legal consumers: GTPE2/GTXE2_COMMON (QPLL
             // clustering), GTXE2_CHANNEL direct (CPLL mode), or a fabric
-            // clock buffer (MGT REFCLK straight into BUFG/BUFH/BUFR).
+            // clock buffer (MGT REFCLK straight into one of
+            // ibufds_gte2_fabric_buffers).
             CellInfo *gt_common = nullptr;
             bool has_gtxe2_channel_direct = false, has_bufg_direct = false;
             const bool o_connected = net != nullptr;
@@ -487,7 +506,7 @@ void XC7Packer::pack_io()
                 for (auto &usr : net->users) {
                     const bool is_gt_common = usr.cell->type.in(id_GTPE2_COMMON, id_GTXE2_COMMON);
                     const bool is_gt_channel = usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL);
-                    const bool is_fabric_clock_buffer = usr.cell->type.in(id_BUFG, id_BUFH, id_BUFHCE, id_BUFR);
+                    const bool is_fabric_clock_buffer = is_ibufds_gte2_fabric_buffer(ctx, usr.cell->type);
                     if (is_gt_common)
                         gt_common = usr.cell;
                     else if (is_gt_channel)
@@ -503,11 +522,11 @@ void XC7Packer::pack_io()
             const bool odiv2_connected = odiv2 != nullptr;
             if (odiv2_connected) {
                 for (auto &usr : odiv2->users) {
-                    const bool is_fabric_clock_buffer = usr.cell->type.in(id_BUFG, id_BUFH, id_BUFHCE, id_BUFR);
+                    const bool is_fabric_clock_buffer = is_ibufds_gte2_fabric_buffer(ctx, usr.cell->type);
                     if (!is_fabric_clock_buffer)
-                        log_error("IBUFDS_GTE2 instance %s output ODIV2 can only drive a BUFG/BUFH/BUFHCE/BUFR, "
-                                  "not %s\n",
-                                  buf_cell->name.c_str(ctx), usr.cell->type.c_str(ctx));
+                        log_error("IBUFDS_GTE2 instance %s output ODIV2 can only drive a %s, not %s\n",
+                                  buf_cell->name.c_str(ctx), ibufds_gte2_fabric_buffer_list().c_str(),
+                                  usr.cell->type.c_str(ctx));
                     odiv2_drives_fabric = true;
                 }
             }
@@ -546,8 +565,8 @@ void XC7Packer::pack_io()
                 continue;
             }
             log_error("IBUFDS_GTE2 instance %s output port must be connected to a GTPE2_COMMON, GTXE2_COMMON, "
-                      "GTXE2_CHANNEL, or BUFG/BUFH/BUFR\n",
-                      buf_cell->name.c_str(ctx));
+                      "GTXE2_CHANNEL, or %s\n",
+                      buf_cell->name.c_str(ctx), ibufds_gte2_fabric_buffer_list().c_str());
         }
 
         // This OBUF is integrated into the GTP/GTX channel pad and does not need placing

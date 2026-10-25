@@ -395,7 +395,18 @@ struct FasmBackend
                     boost::erase_all(loc, "_T1");
                     boost::replace_all(loc, "IOI_OLOGIC", "OLOGIC_Y");
                     // the replacements transformed it into : LIOI3_X0Y73.OLOGIC_Y1
-                    out << loc << "." << "ZINV_T1" << std::endl;
+                    // a T1 tied low needs the site inverter active, as in the pseudo-pip rule below
+                    auto dot = loc.find('.');
+                    std::string tile_name = uarch->tile_name(pip.tile);
+                    std::string site_y = dot == std::string::npos ? "" : loc.substr(dot + 1);
+                    // write_iol_config names the top half of a SING tile Y1.
+                    const bool top_sing_tile =
+                            boost::contains(tile_name, "_SING_") && pip.tile < uarch->hclk_for_ioi(pip.tile);
+                    if (top_sing_tile)
+                        boost::replace_all(site_y, "Y0", "Y1");
+                    const bool site_has_t1_tied_low = ologic_t1_low.count(tile_name + "/" + site_y) != 0;
+                    if (!site_has_t1_tied_low)
+                        out << loc << "." << "ZINV_T1" << std::endl;
                 }
             }
             return;
@@ -453,6 +464,14 @@ struct FasmBackend
                     bool site_has_tristate_register =
                             dot != std::string::npos && ologic_t_registered.count(tile_name + "/" + c.substr(0, dot));
                     if (site_has_tristate_register)
+                        continue;
+                }
+                const bool is_zinv_t1 = boost::ends_with(c, ".ZINV_T1");
+                if (is_zinv_t1) {
+                    auto dot = c.find('.');
+                    const bool site_has_t1_tied_low =
+                            dot != std::string::npos && ologic_t1_low.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_t1_tied_low)
                         continue;
                 }
                 // Phantom-BUFGCTRL guard (per-slot variant): suppress
@@ -1246,8 +1265,21 @@ struct FasmBackend
                 log_error("high performance banks (RIOB18) do not support IO standard %s\n", iostandard.c_str());
 
             bool is_lvcmos15_or_18 = iostandard == "LVCMOS18" || iostandard == "LVCMOS15";
+            // On a right-hand HP bank each drive strength of LVCMOS12, LVCMOS15
+            // and LVCMOS18 is a code of its own over thirteen bits per half,
+            // and its row is <standard>.DRIVE.I<mA>.  The grouped rows below
+            // cover only part of those bits.  The LVCMOS15_LVCMOS18 one is
+            // LVCMOS18 at 12 mA exactly, so every other LVCMOS18 strength and
+            // every LVCMOS15 one came out as that one; the LVCMOS12 one is
+            // none of its four.  Measured on Vivado bitstreams of every
+            // strength, with the same codes on z030, z100 and k160.  Virtex-7
+            // keeps the old rows: the 485T is outside the Vivado licence these
+            // were measured with.
+            const bool drive_has_own_row = is_riob18 && !is_sing && is_low_volt_lvcmos && !device_is_virtex7();
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
+            else if (drive_has_own_row)
+                write_bit(iostandard + ".DRIVE.I" + std::to_string(drive));
             else if (is_hp_bank) {
                 if (is_lvcmos15_or_18) {
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");
@@ -1446,20 +1478,33 @@ struct FasmBackend
             // left-hand block above is the mirror of this one, but the two
             // tile types do not share a feature vocabulary: RIOB18 has no
             // IBUF_HP_BANK_GLUE, no STEPDOWN and no wide
-            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.  The set below
-            // is what a reference bitstream sets for an LVCMOS18 input on
-            // bank 38, including the partner half's slew and pulldown.
-            bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
+            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.
+            //
+            // The enable and IN_ONLY are written below, for either half, as
+            // LVCMOS12_LVCMOS15_LVCMOS18.IN and
+            // LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY: the
+            // names a Vivado bitstream for such an input decodes to on zynq7.
+            // This block wrote LVCMOS12_LVCMOS15.IN and
+            // LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY on top.  The
+            // zynq7 database has neither for RIOB18, so an input on IOB_Y0 of
+            // a z030/z045/z100 HP bank did not assemble; and kintex7's short
+            // .IN also clears 39_01, IOB_Y1's enable, so neither did a tile
+            // whose IOB_Y1 receives too.
+            const bool is_right_hp_single_ended_input_master = is_riob18 && !is_output && !is_diff && is_master_half;
             if (is_right_hp_single_ended_input_master) {
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("LVCMOS12_LVCMOS15.IN");
-                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
 
-                std::string saved = fasm_ctx.back();
-                fasm_ctx.back() = "IOB_Y1";
-                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
-                write_bit("PULLTYPE.PULLDOWN");
-                fasm_ctx.back() = saved;
+                // The partner half, when nothing is bound to it, takes the
+                // bank's slew and is pulled down.  A partner in use describes
+                // itself, and its own PULLTYPE contradicts the pulldown.
+                const bool describe_unused_partner = partner_pad_unused();
+                if (describe_unused_partner) {
+                    std::string saved = fasm_ctx.back();
+                    fasm_ctx.back() = "IOB_Y1";
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    write_bit("PULLTYPE.PULLDOWN");
+                    fasm_ctx.back() = saved;
+                }
             }
             if (!is_diff) {
                 if (iostandard == "LVCMOS33" || iostandard == "LVTTL" || iostandard == "LVCMOS25") {
@@ -1659,6 +1704,9 @@ struct FasmBackend
     // reason for putting a register at the pad at all.  Vivado sets OQUSED and
     // the DDR rate and leaves OMUX alone.
     std::set<std::string> ologic_registered;
+    // OLOGIC sites whose OSERDESE2 has T1 tied to GND: the pad-tristate pseudo-pip must not set
+    // ZINV_T1 there (the GND arrives as VCC_WIRE and needs the site inverter active).
+    std::set<std::string> ologic_t1_low;
 
     // OLOGIC sites whose tristate flip-flop (TFF) holds an ODDR that drives the
     // pad's T input, as "TILE/OLOGIC_Yn".  The pseudo-pip that crosses the site
@@ -1685,6 +1733,19 @@ struct FasmBackend
             ologic_registered.insert(tile + "/" + site_y);
         if (ci->type.in(id_OLOGICE2_TFF, id_OLOGICE3_TFF))
             ologic_t_registered.insert(tile + "/" + site_y);
+        const bool is_oserdese2 = ci->type == id_OSERDESE2_OSERDESE2;
+        if (is_oserdese2) {
+            // pack_constants turns a GND tie on an invertible pin into the VCC net plus
+            // IS_T1_INVERTED, so "tied low" is either form.
+            NetInfo *t1 = ci->getPort(ctx->id("T1"));
+            const bool inverted = bool_or_default(ci->params, ctx->id("IS_T1_INVERTED"), false);
+            const bool tied_to_gnd = t1 != nullptr && t1->name == ctx->id("$PACKER_GND_NET");
+            const bool tied_to_inverted_vcc =
+                    t1 != nullptr && t1->name == ctx->id("$PACKER_VCC_NET") && inverted;
+            const bool t1_tied_low = tied_to_gnd || tied_to_inverted_vcc;
+            if (t1_tied_low)
+                ologic_t1_low.insert(tile + "/" + site_y);
+        }
 
         if (ci->type == id_ILOGICE3_IFF) {
             write_bit("IDDR.IN_USE");
@@ -1840,9 +1901,15 @@ struct FasmBackend
             // For cascaded OSERDESE2, OQUSED must be set even though OQ is not connected
             write_bit("OQUSED", is_cascaded || ci->getPort(id_OQ));
             write_bit("ZINV_CLK", !bool_or_default(ci->params, id_IS_CLK_INVERTED, false));
-            for (std::string t : {"T1", "T2", "T3", "T4"})
-                write_bit("ZINV_" + t, (ci->getPort(ctx->id(t)) != nullptr || t == "T1") &&
+            // A Tn tied to GND reaches the site through the interconnect VCC_WIRE (the only constant
+            // an IMUX can select), so the site inverter must stay active: ZINV_Tn clear. Setting it
+            // turned "always drive" (T1 = 0) into a permanently tri-stated pin.
+            for (std::string t : {"T1", "T2", "T3", "T4"}) {
+                NetInfo *tn = ci->getPort(ctx->id(t));
+                bool tied_low = tn != nullptr && tn->name == ctx->id("$PACKER_GND_NET");
+                write_bit("ZINV_" + t, (tn != nullptr || t == "T1") && !tied_low &&
                                                !bool_or_default(ci->params, ctx->id("IS_" + t + "_INVERTED"), false));
+            }
             for (std::string d : {"D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"})
                 write_bit("IS_" + d + "_INVERTED",
                           bool_or_default(ci->params, ctx->id("IS_" + d + "_INVERTED"), false));
@@ -2107,8 +2174,12 @@ struct FasmBackend
                 push(stringf("BUFGCTRL.BUFGCTRL_X%dY%d", xy.x, xy.y));
                 write_bit("IN_USE");
                 write_bit("INIT_OUT", bool_or_default(ci->params, id_INIT_OUT));
-                write_bit("IS_IGNORE0_INVERTED", bool_or_default(ci->params, id_IS_IGNORE0_INVERTED));
-                write_bit("IS_IGNORE1_INVERTED", bool_or_default(ci->params, id_IS_IGNORE1_INVERTED));
+                // Set for the true polarity of the pin, like the ZINV_* bits:
+                // prjxray named them after the parameter its fuzzer varied
+                // with IGNORE left at ground. Vivado sets the bit for a signal
+                // that is not inverted and for IGNORE tied high.
+                write_bit("IS_IGNORE0_INVERTED", !bool_or_default(ci->params, id_IS_IGNORE0_INVERTED));
+                write_bit("IS_IGNORE1_INVERTED", !bool_or_default(ci->params, id_IS_IGNORE1_INVERTED));
                 write_bit("ZINV_CE0", !bool_or_default(ci->params, id_IS_CE0_INVERTED));
                 write_bit("ZINV_CE1", !bool_or_default(ci->params, id_IS_CE1_INVERTED));
                 write_bit("ZINV_S0", !bool_or_default(ci->params, id_IS_S0_INVERTED));
@@ -2413,17 +2484,24 @@ struct FasmBackend
                           !bool_or_default(ci->params, ctx->id("IS_" + invpin.str(ctx) + "_INVERTED"), false));
             // REGCLKARDRCLK and REGCLKB are SITE pins, not RAMB18E1/RAMB36E1
             // cell ports, so they are absent from invertible_pins.  prjxray's
-            // fuzzer rule: with DO*_REG == 1 the output-register clock FOLLOWS
-            // the corresponding data clock, with DO*_REG == 0 it is always
-            // inverted -- i.e. tag 0, the bit clear, which is what emitting
-            // nothing already gives.  So only the registered case needs
-            // anything written.  (Port of nextpnr-xilinx e71acda2.)
+            // fuzzer solved this only for a port narrower than 36 bits: with
+            // DO*_REG == 1 the output-register clock follows the corresponding
+            // data clock, and with DO*_REG == 0 it is always inverted (tag 0,
+            // the bit clear, which is what emitting nothing already gives).
+            // (Port of nextpnr-xilinx e71acda2.)
+            // A wide SDP read is outside that solve.  Vivado clocks both output
+            // registers from REGCLKARDRCLK and leaves REGCLKB unconnected, so
+            // ZINV_REGCLKB stays clear on both halves even when DOB_REG is 1.
+            // Applying the narrow-port rule there sets the bit.
             bool port_a_output_registered = bool_or_default(ci->params, ctx->id("DOA_REG"), false);
             bool port_b_output_registered = bool_or_default(ci->params, ctx->id("DOB_REG"), false);
             if (port_a_output_registered)
                 write_bit("ZINV_REGCLKARDRCLK",
                           !bool_or_default(ci->params, ctx->id("IS_CLKARDCLK_INVERTED"), false));
-            if (port_b_output_registered)
+            const std::string ram_mode = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP");
+            const bool sdp_leaves_regclkb_clear = ram_mode == "SDP";
+            const bool emit_regclkb_invert = port_b_output_registered && !sdp_leaves_regclkb_clear;
+            if (emit_regclkb_invert)
                 write_bit("ZINV_REGCLKB",
                           !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             for (auto wrmode : {"WRITE_MODE_A", "WRITE_MODE_B"}) {
@@ -2960,7 +3038,9 @@ struct FasmBackend
             write_bit("USE_DPORT[0]");
 
         auto use_simd = str_or_default(ci->params, ctx->id("USE_SIMD"), "ONE48");
-        if (use_simd == "TWO24")
+        // FOUR12 needs both features: USE_SIMD_FOUR12 cuts at 12 and 36,
+        // USE_SIMD_FOUR12_TWO24 cuts at 24 (shared with TWO24)
+        if (use_simd == "TWO24" || use_simd == "FOUR12")
             write_bit("USE_SIMD_FOUR12_TWO24");
         if (use_simd == "FOUR12")
             write_bit("USE_SIMD_FOUR12");
@@ -2973,10 +3053,14 @@ struct FasmBackend
             write_vector("PATTERN[47:0]", pattern_vector);
         }
 
+        // As prjxray's 100-dsp-mskpat fuzzer tags them: AUTORESET_PATDET_RESET
+        // for RESET_MATCH and RESET_NOT_MATCH, _RESET_NOT_MATCH for the second only.
         auto autoreset_patdet = str_or_default(ci->params, ctx->id("AUTORESET_PATDET"), "NO_RESET");
-        if (autoreset_patdet == "RESET_MATCH")
+        const bool autoreset_on_pattern = autoreset_patdet == "RESET_MATCH" || autoreset_patdet == "RESET_NOT_MATCH";
+        if (autoreset_on_pattern)
             write_bit("AUTORESET_PATDET_RESET");
-        if (autoreset_patdet == "RESET_NOT_MATCH")
+        const bool autoreset_on_not_match = autoreset_patdet == "RESET_NOT_MATCH";
+        if (autoreset_on_not_match)
             write_bit("AUTORESET_PATDET_RESET_NOT_MATCH");
 
         // MASK
@@ -3000,6 +3084,11 @@ struct FasmBackend
         if (sel_mask == "ROUNDING_MODE2")
             write_bit("SEL_MASK_ROUNDING_MODE2");
 
+        const std::string sel_pattern = str_or_default(ci->params, ctx->id("SEL_PATTERN"), "PATTERN");
+        const bool sel_pattern_is_c = sel_pattern == "C";
+        if (sel_pattern_is_c)
+            write_bit("SEL_PATTERN_C");
+
         // ZADREG means ADREG is off. Vivado also sets it when USE_DPORT is
         // false, whatever ADREG says: the pre-adder is unused, so that
         // pipeline register stays off. The fuzzer only tags the bit while
@@ -3007,7 +3096,10 @@ struct FasmBackend
         const bool adreg_on = bool_or_default(ci->params, ctx->id("ADREG"), true);
         const bool zadreg_off = !use_dport || !adreg_on;
         write_bit("ZADREG[0]", zadreg_off);
-        write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG")));
+        // The pipeline registers a DSP48E1 does not name are on: UG479 gives every
+        // *REG attribute the default 1, and Vivado builds that.  yosys writes them
+        // out when it infers the DSP, so only an instantiated one leaves them unset.
+        write_bit("ZALUMODEREG[0]", !bool_or_default(ci->params, ctx->id("ALUMODEREG"), true));
         // prjxray's AREG_2_ACASCREG_1 is the conjunction AREG == 2 && ACASCREG == 1
         // (fuzzers/100-dsp-mskpat/generate.py), not ACASCREG: its Z bit is set
         // unless both hold.  Vivado agrees -- it clears the bit only for AREG=2
@@ -3016,20 +3108,20 @@ struct FasmBackend
         auto bcascreg = int_or_default(ci->params, ctx->id("BCASCREG"), 1);
         write_bit("ZAREG_2_ACASCREG_1", !(areg == 2 && acascreg == 1));
         write_bit("ZBREG_2_BCASCREG_1", !(breg == 2 && bcascreg == 1));
-        write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG")));
-        write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG")));
+        write_bit("ZCARRYINREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINREG"), true));
+        write_bit("ZCARRYINSELREG[0]", !bool_or_default(ci->params, ctx->id("CARRYINSELREG"), true));
         write_bit("ZCREG[0]", !bool_or_default(ci->params, ctx->id("CREG"), true));
         // Same rule as ZADREG, for the D input register.
         const bool dreg_on = bool_or_default(ci->params, ctx->id("DREG"), true);
         const bool zdreg_off = !use_dport || !dreg_on;
         write_bit("ZDREG[0]", zdreg_off);
-        write_bit("ZINMODEREG[0]", !bool_or_default(ci->params, ctx->id("INMODEREG")));
+        write_bit("ZINMODEREG[0]", !bool_or_default(ci->params, ctx->id("INMODEREG"), true));
         write_bus_zinv("ALUMODE", 4);
         write_bus_zinv("INMODE", 5);
         write_bus_zinv("OPMODE", 7);
-        write_bit("ZMREG[0]", !bool_or_default(ci->params, ctx->id("MREG")));
-        write_bit("ZOPMODEREG[0]", !bool_or_default(ci->params, ctx->id("OPMODEREG")));
-        write_bit("ZPREG[0]", !bool_or_default(ci->params, ctx->id("PREG")));
+        write_bit("ZMREG[0]", !bool_or_default(ci->params, ctx->id("MREG"), true));
+        write_bit("ZOPMODEREG[0]", !bool_or_default(ci->params, ctx->id("OPMODEREG"), true));
+        write_bit("ZPREG[0]", !bool_or_default(ci->params, ctx->id("PREG"), true));
         write_bit("USE_DPORT[0]", boolstr_or_default(ci->params, ctx->id("USE_DPORT"), false));
         write_bit("ZIS_CLK_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CLK_INVERTED")));
         write_bit("ZIS_CARRYIN_INVERTED", !bool_or_default(ci->params, ctx->id("IS_CARRYIN_INVERTED")));
@@ -3171,8 +3263,41 @@ struct FasmBackend
         push(tile_name);
         Loc siteLoc = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
-        // IN_USE stays clear in Vivado for a placed buffer (Artix-7 GTP and
-        // Zynq-7000 GTX, either site, any CEB, pads connected or open).
+        // Vivado sets IN_USE only when the reference clock goes to a
+        // transceiver and nowhere else: O to GTREFCLK0/1 of the COMMON or of a
+        // channel of this quad, and neither O nor ODIV2 to a fabric clock
+        // buffer.  With a fabric load it stays clear, at any CEB (#97), and
+        // writing it there is what silenced the factory UART in #86.  pack_gt
+        // has already disconnected the hardwired GTREFCLK inputs and recorded
+        // them on the GT cells, so what is left on O and ODIV2 are the fabric
+        // loads.  Xilinx numbers the sites of a quad per column: COMMON
+        // X<n>Y<q>, IBUFDS_GTE2 X<n>Y<2q> and Y<2q+1>, channels X<n>Y<4q> to
+        // Y<4q+3>.
+        const SiteIndex buf_site = uarch->get_bel_site(ci->bel);
+        const auto &buf_site_data = uarch->tile_extra_data(buf_site.tile)->sites[buf_site.site];
+        const IdString refclk_used_attr = ctx->id(siteLoc.y == 0 ? "_GTREFCLK0_USED" : "_GTREFCLK1_USED");
+        bool drives_gt_refclk = false;
+        for (auto &cell : ctx->cells) {
+            const CellInfo *gt = cell.second.get();
+            const bool is_placed_gt =
+                    gt->type.in(id_GTPE2_COMMON, id_GTXE2_COMMON, id_GTPE2_CHANNEL, id_GTXE2_CHANNEL) &&
+                    gt->bel != BelId();
+            if (!is_placed_gt)
+                continue;
+            const SiteIndex gt_site = uarch->get_bel_site(gt->bel);
+            const auto &gt_site_data = uarch->tile_extra_data(gt_site.tile)->sites[gt_site.site];
+            const int gt_quad =
+                    gt->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL) ? gt_site_data.site_y / 4 : gt_site_data.site_y;
+            const bool takes_this_refclk = gt_site_data.site_x == buf_site_data.site_x &&
+                                           gt_quad == buf_site_data.site_y / 2 &&
+                                           bool_or_default(gt->params, refclk_used_attr, false);
+            if (takes_this_refclk)
+                drives_gt_refclk = true;
+        }
+        const NetInfo *o = ci->getPort(id_O);
+        const NetInfo *odiv2 = ci->getPort(ctx->id("ODIV2"));
+        const bool drives_fabric = (o != nullptr && !o->users.empty()) || (odiv2 != nullptr && !odiv2->users.empty());
+        write_bit("IN_USE", drives_gt_refclk && !drives_fabric);
         // CLKCM_CFG and CLKRCV_TRST are the bits that follow the site.
         // Xilinx sources write these as the STRINGS "TRUE"/"FALSE", which is
         // what the LiteEth PCS instantiates them with; bool_or_default wants a
@@ -3220,13 +3345,41 @@ struct FasmBackend
                          int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3), 2);
         pop(2);
     }
+    // ENABLE_DRP of a COMMON follows the DRP of the channels of its quad,
+    // not its own DRP: Vivado sets it when a channel of the quad drives DRPWE,
+    // and leaves it clear for a COMMON whose DRP is in use with idle channels,
+    // and for a channel that drives only DRPCLK, DRPEN or the address and
+    // data.  Xilinx numbers the sites of a quad per column: COMMON X<n>Y<q>,
+    // channels X<n>Y<4q> to Y<4q+3>.
+    bool quad_channel_drp_write_used(const CellInfo *common)
+    {
+        const SiteIndex common_site = uarch->get_bel_site(common->bel);
+        const auto &common_site_data = uarch->tile_extra_data(common_site.tile)->sites[common_site.site];
+        const IdString drpwe = ctx->id("DRPWE");
+        for (auto &cell : ctx->cells) {
+            CellInfo *ch = cell.second.get();
+            const bool is_placed_channel = ch->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL) && ch->bel != BelId();
+            if (!is_placed_channel)
+                continue;
+            const SiteIndex ch_site = uarch->get_bel_site(ch->bel);
+            const auto &ch_site_data = uarch->tile_extra_data(ch_site.tile)->sites[ch_site.site];
+            const NetInfo *we = ch->getPort(drpwe);
+            const bool drives_drpwe_in_this_quad = ch_site_data.site_x == common_site_data.site_x &&
+                                                   ch_site_data.site_y / 4 == common_site_data.site_y &&
+                                                   we != nullptr && we->driver.cell != nullptr &&
+                                                   !we->driver.cell->type.in(id_PSEUDO_GND, id_PSEUDO_VCC);
+            if (drives_drpwe_in_this_quad)
+                return true;
+        }
+        return false;
+    }
     void write_gtp_pll(CellInfo *ci)
     {
         push(uarch->tile_name(ci->bel.tile));
 
         push("GTPE2_COMMON");
         write_bit("IN_USE");
-        write_bit("ENABLE_DRP", bool_or_default(ci->params, ctx->id("_DRPCLK_USED"), false));
+        write_bit("ENABLE_DRP", quad_channel_drp_write_used(ci));
         write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
@@ -3244,13 +3397,14 @@ struct FasmBackend
         auto common_cfg = int_or_default(ci->params, ctx->id("COMMON_CFG"), 0);
         write_int_vector("COMMON_CFG[31:0]", common_cfg, 32);
 
-        // according to ug482, these attributes contain magic undocumented and reserved wizard values
-        write_int_vector("PLL0_CFG[20:0]", 0b111110000001111011100, 21);
-        write_int_vector("PLL1_CFG[20:0]", 0b111110000001111011100, 21);
-        write_int_vector("PLL0_INIT_CFG[4:0]", 0b11110, 5);
-        write_int_vector("PLL1_INIT_CFG[4:0]", 0b11110, 5);
-        write_int_vector("PLL0_LOCK_CFG[8:0]", 0b111101000, 9);
-        write_int_vector("PLL1_LOCK_CFG[8:0]", 0b111101000, 9);
+        // according to ug482, these attributes contain magic undocumented and reserved wizard values.
+        // Vivado writes the instance's value (PCIe asks PLL*_CFG = 0x1F024C); the defaults are unisim's.
+        write_int_vector("PLL0_CFG[26:0]", int_or_default(ci->params, ctx->id("PLL0_CFG"), 0x01F03DC), 27);
+        write_int_vector("PLL1_CFG[26:0]", int_or_default(ci->params, ctx->id("PLL1_CFG"), 0x01F03DC), 27);
+        write_int_vector("PLL0_INIT_CFG[23:0]", int_or_default(ci->params, ctx->id("PLL0_INIT_CFG"), 0x00001E), 24);
+        write_int_vector("PLL1_INIT_CFG[23:0]", int_or_default(ci->params, ctx->id("PLL1_INIT_CFG"), 0x00001E), 24);
+        write_int_vector("PLL0_LOCK_CFG[8:0]", int_or_default(ci->params, ctx->id("PLL0_LOCK_CFG"), 0x1E8), 9);
+        write_int_vector("PLL1_LOCK_CFG[8:0]", int_or_default(ci->params, ctx->id("PLL1_LOCK_CFG"), 0x1E8), 9);
 
         auto pll0_refclk_div = int_or_default(ci->params, ctx->id("PLL0_REFCLK_DIV"), 1);
         bool invalid_pll0_refclk_div = pll0_refclk_div < 1 || pll0_refclk_div > 2;
@@ -3860,7 +4014,11 @@ struct FasmBackend
             log_error("TXPI_PPMCLK_SEL may only have values 'TXUSRCLK2' or 'TXUSRCLK' but is: '%s'\n", txpi_ppmclk_sel.c_str());
         write_bit("TXPI_PPMCLK_SEL.TXUSRCLK2", txpi_ppmclk_sel == "TXUSRCLK2");
         auto txpi_synfreq_ppm = int_or_default(ci->params, ctx->id("TXPI_SYNFREQ_PPM"), 0);
-        if (txpi_synfreq_ppm == 0) log_error("TXPI_SYNFREQ_PPM must not be zero!\n");
+        // A 3-bit attribute whose default is 0 (unisim); Vivado builds 0 with the
+        // three bits clear.
+        const bool invalid_txpi_synfreq_ppm = txpi_synfreq_ppm < 0 || txpi_synfreq_ppm > 7;
+        if (invalid_txpi_synfreq_ppm)
+            log_error("TXPI_SYNFREQ_PPM may only have values from 0 to 7 but is: %d\n", txpi_synfreq_ppm);
         write_int_vector("TXPI_SYNFREQ_PPM[2:0]", txpi_synfreq_ppm, 3);
         auto txpi_cfg0 = int_or_default(ci->params, ctx->id("TXPI_CFG0"), 0);
         write_int_vector("TXPI_CFG0[1:0]", txpi_cfg0, 2);
@@ -3899,7 +4057,7 @@ struct FasmBackend
 
         push("GTXE2_COMMON");
         write_bit("IN_USE");
-        write_bit("ENABLE_DRP", bool_or_default(ci->params, ctx->id("_DRPCLK_USED"), false));
+        write_bit("ENABLE_DRP", quad_channel_drp_write_used(ci));
         write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));

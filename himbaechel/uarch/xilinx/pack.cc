@@ -1021,6 +1021,20 @@ void XilinxPacker::tie_port(CellInfo *ci, const std::string &port, bool value, b
         ci->params[ctx->idf("IS_%s_INVERTED", port.c_str())] = Property(1);
 }
 
+// Whether REGCLKB of a block RAM is left without a net: Vivado does so when
+// RAM_MODE says SDP, also on cells its DRC rejects, and the SDP transformation
+// in pack_bram() packs a cell as SDP when port B writes the full width (36
+// bits on a RAMB18E1, 72 on a RAMB36E1), with or without RAM_MODE.  The
+// transformation decides how the cell is packed; this decides whether REGCLKB
+// gets a net, so it looks at both.
+static bool bram_regclkb_without_net(const Context *ctx, const CellInfo *ci)
+{
+    const bool sdp_by_mode = str_or_default(ci->params, ctx->id("RAM_MODE"), "TDP") == "SDP";
+    const int full_width = (ci->type == id_RAMB36E1) ? 72 : 36;
+    const bool sdp_by_width = int_or_default(ci->params, id_WRITE_WIDTH_B, 0) == full_width;
+    return sdp_by_mode || sdp_by_width;
+}
+
 void XC7Packer::pack_bram()
 {
     log_info("Packing BRAM..\n");
@@ -1110,6 +1124,43 @@ void XC7Packer::pack_bram()
     log_info("BRAM cascade scan: %d BRAM(s), %d tie(s) seen, %d dropped\n", casc_bram, casc_seen,
              casc_dropped);
 
+    // The output registers (DOA_REG/DOB_REG) are clocked through site pins of
+    // their own, REGCLKARDRCLK and REGCLKB (L and U on a RAMB36), which the
+    // primitive has no port for.  prjxray feeds them from rows 4 and 0 of the
+    // INT tiles beside the BRAM (the data clocks use rows 3 and 1), so with
+    // nothing connected no clock reaches those rows and the register never
+    // loads: the output holds its initial value.  Vivado drives them from the
+    // port clocks: REGCLKARDRCLK from CLKARDCLK when DOA_REG is set, REGCLKB
+    // from CLKBWRCLK when DOB_REG is set, except in SDP, where the read word
+    // is registered from REGCLKARDRCLK and REGCLKB is left without a net.
+    // The logical names are mapped to the L/U bel pins by get_bram36_ul_pins.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_bram = ci->type.in(id_RAMB18E1, id_RAMB36E1);
+        if (!is_bram)
+            continue;
+        const bool port_a_output_registered = bool_or_default(ci->params, id_DOA_REG, false);
+        const bool port_b_output_registered = bool_or_default(ci->params, id_DOB_REG, false);
+        const bool no_output_register = !port_a_output_registered && !port_b_output_registered;
+        if (no_output_register)
+            continue;
+        auto connect_register_clock = [&](const char *regclk, IdString data_clock) {
+            NetInfo *clk = ci->getPort(data_clock);
+            const bool data_clock_unconnected = clk == nullptr;
+            if (data_clock_unconnected)
+                return;
+            IdString port = ctx->id(regclk);
+            ci->addInput(port);
+            ci->connectPort(port, clk);
+        };
+        if (port_a_output_registered)
+            connect_register_clock("REGCLKARDRCLK", id_CLKARDCLK);
+        const bool regclkb_without_net = bram_regclkb_without_net(ctx, ci);
+        const bool regclkb_used = port_b_output_registered && !regclkb_without_net;
+        if (regclkb_used)
+            connect_register_clock("REGCLKB", id_CLKBWRCLK);
+    }
+
     // Process SDP BRAM first
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
@@ -1132,16 +1183,29 @@ void XC7Packer::pack_bram()
                 if (write_width >= (9 * we_width))
                     continue;
                 int used_we_width = std::max(write_width / 9, 1);
-                for (int i = used_we_width; i < we_width; i++) {
-                    NetInfo *low_we = ci->getPort(ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") +
-                                                          std::to_string(i % used_we_width) + "]"));
-                    IdString curr_we = ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") + std::to_string(i) + "]");
-                    if (!ci->ports.count(curr_we)) {
+                std::string we_prefix = (port == 'B') ? "WEBWE[" : "WEA[";
+                // The byte enables in use, read before any of them is rewritten
+                std::vector<NetInfo *> used_we;
+                for (int i = 0; i < used_we_width; i++)
+                    used_we.push_back(ci->getPort(ctx->id(we_prefix + std::to_string(i) + "]")));
+                // Port B of an 18Kb block takes each byte enable on a pair of site pins, the way
+                // Vivado places them: in x18, WEBWE[0] on WEBWE0 and WEBWE1, WEBWE[1] on WEBWE2 and
+                // WEBWE3 (the pins are named after WEBWE[i] one to one). Port A gets its pairs from
+                // the WEA[0]/WEA[1] rules, and a 36Kb block repeats them (WE[i % used], also Vivado's).
+                const bool we_in_pairs = ci->type == id_RAMB18E1 && port == 'B';
+                for (int i = 0; i < we_width; i++) {
+                    int src = we_in_pairs ? (i * used_we_width / we_width) : (i % used_we_width);
+                    const bool already_there = (src == i);
+                    if (already_there)
+                        continue;
+                    IdString curr_we = ctx->id(we_prefix + std::to_string(i) + "]");
+                    const bool port_missing = !ci->ports.count(curr_we);
+                    if (port_missing) {
                         ci->ports[curr_we].type = PORT_IN;
                         ci->ports[curr_we].name = curr_we;
                     }
                     ci->disconnectPort(curr_we);
-                    ci->connectPort(curr_we, low_we);
+                    ci->connectPort(curr_we, used_we.at(src));
                 }
             }
         }
@@ -1426,6 +1490,7 @@ void XilinxImpl::pack()
     packer.pack_io();
     packer.prepare_clocking();
     packer.pack_constants();
+    packer.raise_bufg_ignore1();
     packer.pack_iologic();
     packer.pack_idelayctrl();
     packer.pack_cfg();

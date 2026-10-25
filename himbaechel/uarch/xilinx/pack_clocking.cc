@@ -54,9 +54,16 @@ BelId XilinxPacker::find_bel_with_short_route(WireId source, IdString beltype, I
 
             IdString intent = ctx->getWireType(dst);
             // log_info("%s %s\n", ctx->nameOfWire(dst), ctx->nameOf(intent));
-            if (intent.in(id_NODE_DOUBLE, id_NODE_HLONG, id_NODE_HQUAD, id_NODE_VLONG, id_NODE_VQUAD, id_NODE_SINGLE,
-                          id_NODE_CLE_OUTPUT, id_NODE_OPTDELAY, id_BENTQUAD, id_DOUBLE, id_HLONG, id_HQUAD, id_OPTDELAY,
-                          id_SINGLE, id_VLONG, id_VLONG12, id_VQUAD))
+            // The wire types route_clocks() refuses.  Without PINBOUNCE a clock
+            // with no dedicated way to a free bel walks the FAN bounce chain of
+            // the fabric down to a CLK_BUFG_IMUX, and the bel found that way is
+            // locked "based on dedicated routing" on a site its clock cannot
+            // reach through the clock network.
+            const bool wire_is_not_clock_routing =
+                    intent.in(id_NODE_DOUBLE, id_NODE_HLONG, id_NODE_HQUAD, id_NODE_VLONG, id_NODE_VQUAD,
+                              id_NODE_SINGLE, id_NODE_CLE_OUTPUT, id_NODE_OPTDELAY, id_BENTQUAD, id_DOUBLE, id_HLONG,
+                              id_HQUAD, id_OPTDELAY, id_SINGLE, id_VLONG, id_VLONG12, id_VQUAD, id_PINBOUNCE);
+            if (wire_is_not_clock_routing)
                 continue;
 
             if (visited.count(dst))
@@ -195,6 +202,64 @@ void XC7Packer::bypass_pll_input_buffers()
                  removed);
 }
 
+// Vivado ties IGNORE1 of a BUFG or BUFGCE high: the unused I1 is never
+// waited for. pack_constants() has tied it low, to VCC through the site
+// inverter; clearing the inverter here, instead of tying the pin in
+// prepare_clocking(), keeps the users of the VCC net in their order, and with
+// them the routing of every design.
+void XC7Packer::raise_bufg_ignore1()
+{
+    for (CellInfo *ci : bufgs_ignoring_i1)
+        ci->params[id_IS_IGNORE1_INVERTED] = Property(0);
+}
+
+// BUFGMUX, BUFGMUX_1 and BUFGMUX_CTRL on a BUFGCTRL, as Vivado builds them:
+// BUFGMUX and BUFGMUX_1 switch on the clock enables (CE1 = S, CE0 = S through
+// the site inverter, S0 = S1 = 1), BUFGMUX_CTRL on the selects (S1 = S, S0 = S
+// inverted, CE0 = CE1 = 1). IGNORE0/IGNORE1 are low, or high with CLK_SEL_TYPE
+// "ASYNC". BUFGMUX_1 idles high (INIT_OUT).
+void XC7Packer::bufgmux_to_bufgctrl(CellInfo *ci)
+{
+    const std::string type = ci->type.str(ctx);
+    for (IdString port : {id_I0, id_I1, id_S}) {
+        const bool port_has_no_net = ci->getPort(port) == nullptr;
+        if (port_has_no_net)
+            log_error("%s '%s': port %s is not connected\n", type.c_str(), ci->name.c_str(ctx), port.c_str(ctx));
+    }
+    IdString clk_sel_type = ctx->id("CLK_SEL_TYPE");
+    const std::string sel = str_or_default(ci->params, clk_sel_type, "SYNC");
+    const bool sel_is_async = sel == "ASYNC";
+    const bool sel_is_unknown = !sel_is_async && sel != "SYNC";
+    if (sel_is_unknown)
+        log_error("%s '%s': CLK_SEL_TYPE must be \"SYNC\" or \"ASYNC\", not \"%s\"\n", type.c_str(),
+                  ci->name.c_str(ctx), sel.c_str());
+    ci->params.erase(clk_sel_type);
+
+    NetInfo *s = ci->getPort(id_S);
+    ci->type = id_BUFGCTRL;
+    const bool switches_on_selects = type == "BUFGMUX_CTRL";
+    if (switches_on_selects) {
+        ci->renamePort(id_S, id_S1);
+        ci->addInput(id_S0);
+        ci->connectPort(id_S0, s);
+        ci->params[id_IS_S0_INVERTED] = Property(1);
+        tie_port(ci, "CE0", true, true);
+        tie_port(ci, "CE1", true, true);
+    } else {
+        ci->renamePort(id_S, id_CE1);
+        ci->addInput(id_CE0);
+        ci->connectPort(id_CE0, s);
+        ci->params[id_IS_CE0_INVERTED] = Property(1);
+        tie_port(ci, "S0", true, true);
+        tie_port(ci, "S1", true, true);
+    }
+    tie_port(ci, "IGNORE0", sel_is_async, true);
+    tie_port(ci, "IGNORE1", sel_is_async, true);
+    const bool idles_high = type == "BUFGMUX_1";
+    if (idles_high)
+        ci->params[id_INIT_OUT] = Property(1);
+}
+
 void XC7Packer::prepare_clocking()
 {
     log_info("Preparing clocking...\n");
@@ -215,14 +280,16 @@ void XC7Packer::prepare_clocking()
             tie_port(ci, "CE0", true, true);
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
-            tie_port(ci, "IGNORE0", true, true);
+            tie_port(ci, "IGNORE0", false, true);
+            bufgs_ignoring_i1.push_back(ci);
         } else if (ci->type == id_BUFGCE) {
             ci->type = id_BUFGCTRL;
             ci->renamePort(id_I, id_I0);
             ci->renamePort(id_CE, id_CE0);
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
-            tie_port(ci, "IGNORE0", true, true);
+            tie_port(ci, "IGNORE0", false, true);
+            bufgs_ignoring_i1.push_back(ci);
         } else if (is_horizontal_clock_buffer) {
             // BUFH is the legacy non-CE spelling; both map to the BUFHCE bel
             // with CE tied active (port of nextpnr-xilinx pack_clocking_xc7.cc)
@@ -241,6 +308,13 @@ void XC7Packer::prepare_clocking()
             // and the run dies with "no Bels remaining of type 'BUFIO'" while
             // the BUFIO_BUFIO sites sit unused.  (Port of nextpnr-xilinx #157.)
             ci->type = id_BUFIO_BUFIO;
+        } else {
+            // The BUFGMUX names have no constid: compare the string, as a
+            // ctx->id() here would intern them for every design.
+            const std::string &type = ci->type.str(ctx);
+            const bool is_bufgmux = type == "BUFGMUX" || type == "BUFGMUX_1" || type == "BUFGMUX_CTRL";
+            if (is_bufgmux)
+                bufgmux_to_bufgctrl(ci);
         }
     }
 }
@@ -310,6 +384,21 @@ void XC7Packer::pack_gbs()
 
 void XC7Packer::preplace_clocking()
 {
+    // The XDC's LOCs on these cells first.  Each site picked below follows
+    // from where the driver sits and from which sites are still free; a LOC
+    // applied after that (prePlace) moves the driver, or evicts a cell from
+    // the site it names, and leaves the loads chosen here on sites the clock
+    // cannot reach through the clock network.  Only when there is such a LOC:
+    // resolving one names every site of the device, and those names are
+    // IdStrings the rest of the flow would otherwise create later.
+    const pool<IdString> clocking_types{
+            id_BUFGCTRL,    id_BUFG_BUFG,           id_BUFHCE_BUFHCE,        id_MMCM_MMCM_TOP,
+            id_PLL_PLL_TOP, id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV};
+    const bool a_clocking_cell_has_a_loc = std::any_of(ctx->cells.begin(), ctx->cells.end(), [&](const auto &cell) {
+        return clocking_types.count(cell.second->type) && cell.second->attrs.count(id_LOC);
+    });
+    if (a_clocking_cell_has_a_loc)
+        uarch->apply_loc_constraints(clocking_types);
     bool did_something = false;
     do {
         did_something = false;
@@ -713,7 +802,7 @@ void XilinxPacker::generate_constraints()
             if (!equals_epsilon_constr(*to->clkconstr, *constr) && user_constrained.count(to->name))
                 log_warning("    Overriding derived constraint of %.1f MHz on net %s with user-specified constraint of "
                             "%.1f MHz.\n",
-                            MHz(to->clkconstr->period.min_delay), to->name.c_str(ctx), MHz(constr->period.min_delay));
+                            MHz(constr->period.min_delay), to->name.c_str(ctx), MHz(to->clkconstr->period.min_delay));
             return;
         }
         to->clkconstr = std::move(constr);
@@ -734,8 +823,8 @@ void XilinxPacker::generate_constraints()
                 user_constrained.count(to->name))
                 log_warning("    Overriding derived constraint of %.1f MHz on net %s with user-specified constraint of "
                             "%.1f MHz.\n",
-                            MHz(to->clkconstr->period.minDelay()), to->name.c_str(ctx),
-                            MHz(delay_t(from->clkconstr->period.minDelay() / ratio)));
+                            MHz(delay_t(from->clkconstr->period.minDelay() / ratio)), to->name.c_str(ctx),
+                            MHz(to->clkconstr->period.minDelay()));
             return;
         }
         to->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint());
@@ -792,10 +881,33 @@ void XilinxPacker::generate_constraints()
                          MHz(period_in));
                 double period_in_div = period_in * int_or_default(ci->params, id_DIVCLK_DIVIDE, 1);
 
+                // The feedback net is normally driven by the PLL itself, but
+                // Vivado's clocking wizard always puts a global buffer between
+                // CLKFBOUT and CLKFBIN (BUFG clkf_buf), so follow clock buffers
+                // back to the PLL's own output port instead of assuming a direct
+                // connection: without this the whole PLL is skipped and the
+                // design is timed at the default frequency.
                 const NetInfo *clkfb = ci->getPort(id_CLKFBIN);
-                if (!clkfb || clkfb->driver.cell != ci)
+                if (clkfb == nullptr || clkfb->driver.cell == nullptr)
                     continue;
-                const std::string &clkfb_port = clkfb->driver.port.str(ctx);
+                CellInfo *fb_driver = clkfb->driver.cell;
+                IdString fb_port = clkfb->driver.port;
+                for (int hop = 0; fb_driver != ci && hop < 8; hop++) {
+                    if (!fb_driver->type.in(id_BUFGCTRL, id_BUFG, id_BUFG_BUFG, id_BUFH, id_BUFHCE, id_BUFHCE_BUFHCE,
+                                            id_BUFIO, id_BUFIO_BUFIO, id_BUFMRCE))
+                        break;
+                    NetInfo *upstream =
+                            fb_driver->ports.count(id_I0) ? fb_driver->getPort(id_I0) : fb_driver->getPort(id_I);
+                    if (upstream == nullptr && fb_driver->ports.count(id_I1))
+                        upstream = fb_driver->getPort(id_I1);
+                    if (upstream == nullptr || upstream->driver.cell == nullptr)
+                        break;
+                    fb_driver = upstream->driver.cell;
+                    fb_port = upstream->driver.port;
+                }
+                if (fb_driver != ci)
+                    continue;
+                const std::string &clkfb_port = fb_port.str(ctx);
                 double feedback_div = 0;
                 if (clkfb_port == "CLKFBOUT") {
                     feedback_div = float_or_default(

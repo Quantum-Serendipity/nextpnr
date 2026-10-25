@@ -575,7 +575,10 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
 // column an MMCM sits in decides whether the GT's clocks can reach it at all.
 // The sites Vivado chooses are the ones known to work; this is how a design
 // says "put it there".
-void XilinxImpl::apply_loc_constraints()
+//
+// With only_types, just the cells of those types: the packer applies the
+// clocking cells' LOCs before it places their neighbours from them.
+void XilinxImpl::apply_loc_constraints(const pool<IdString> &only_types)
 {
     dict<std::pair<IdString, IdString>, BelId> by_site_and_type;
     dict<IdString, int> site_seen;
@@ -604,6 +607,9 @@ void XilinxImpl::apply_loc_constraints()
         CellInfo *ci = cell.second.get();
         auto loc = ci->attrs.find(id_LOC);
         if (loc == ci->attrs.end())
+            continue;
+        const bool type_is_left_for_later = !only_types.empty() && !only_types.count(ci->type);
+        if (type_is_left_for_later)
             continue;
         // A pad's LOC is a PACKAGE_PIN, not a site, and pack_io resolves it
         // against the package rather than the tile grid.  That one belongs to
@@ -915,7 +921,15 @@ void XilinxImpl::configurePlacerHeap(PlacerHeapCfg &cfg)
 {
     cfg.hpwl_scale_x = 2;
     cfg.hpwl_scale_y = 1;
-    cfg.beta = 0.5;
+    // command.cc stores the generic HeAP default when --placer-heap-beta is
+    // absent, as the text std::to_string(0.9), so the setting is always
+    // present.  This arch wants 0.5 in that case.  Any other value came from
+    // the user and is kept.  An explicit 0.9 is the same text and gets 0.5
+    // as well.
+    const std::string beta_text = ctx->setting<std::string>("placerHeap/beta");
+    const bool beta_is_generic_default = beta_text == std::to_string(0.9);
+    if (beta_is_generic_default)
+        cfg.beta = 0.5;
     cfg.placeAllAtOnce = true;
     cfg.get_cell_legalisation_weight = [this](Context *, CellInfo *ci) {
         if (ci->type != id_SLICE_LUTX)

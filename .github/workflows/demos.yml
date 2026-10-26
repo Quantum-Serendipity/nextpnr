@@ -609,6 +609,28 @@ jobs:
             timeout: 120
             pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --freq 25
 
+          # The Vortex GPGPU, one core of 4 warps x 4 threads, standalone on
+          # the VC707 with its program in block RAM and the LEDs as output.
+          # The largest netlist in the gate: 171,441 cells, 99 k LUTs,
+          # 6,815 RAM64X1D (the register files, operand collectors and cache
+          # tag stores as distributed RAM -- no other entry packs LUTRAM at
+          # this scale), 241 RAMB36 and 37 DSP48E1, synthesised by the
+          # Verilator synthesis fork, not by yosys.  On a 24-thread desktop
+          # this branch places and routes it in 79 min (router2, 26
+          # iterations); a hosted runner is slower, so the timeout is the
+          # maximum and a timeout here measures the router's cost, not a
+          # defect.  See its README.
+          - name: vc707-vortex
+            tier: stretch
+            source: netlist
+            design: vc707-vortex
+            netlist: vortex_vc707.json.gz
+            xdc: vortex_vc707_open.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 360
+
     steps:
       - uses: actions/checkout@v4
         with:

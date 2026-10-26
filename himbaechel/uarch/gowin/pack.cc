@@ -203,6 +203,27 @@ void GowinPacker::pack_adc(void)
 }
 
 // ===================================
+// GW JTAG
+// ===================================
+void GowinPacker::pack_gw_jtag(void)
+{
+    log_info("Pack GW JTAG...\n");
+
+    for (auto &cell : ctx->cells) {
+        auto &ci = *cell.second;
+
+        if (is_gw_jtag(&ci)) {
+            // disconnect pads - they have no wires
+            ci.disconnectPort(ctx->id("tck_pad_i"));
+            ci.disconnectPort(ctx->id("tms_pad_i"));
+            ci.disconnectPort(ctx->id("tdi_pad_i"));
+            ci.disconnectPort(ctx->id("tdo_pad_o"));
+            ci.disconnectPort(ctx->id("pause_dr_o"));
+        }
+    }
+}
+
+// ===================================
 // HCLK -- CLKDIV and CLKDIV2 for now
 // ===================================
 void GowinPacker::pack_hclk(void)
@@ -285,6 +306,11 @@ void GowinPacker::pack_buffered_nets(void)
         NetInfo *ni = net.second.get();
         if (ni->driver.cell == nullptr || ni->users.empty() || net.first == ctx->id("$PACKER_GND") ||
             net.first == ctx->id("$PACKER_VCC")) {
+            continue;
+        }
+        // a BUFG of the design drives the net or buffers it already: no second one in a chain
+        if (gwu.driver_is_buf(ni->driver) ||
+            std::any_of(ni->users.begin(), ni->users.end(), [](const PortRef &u) { return u.cell->type == id_BUFG; })) {
             continue;
         }
         if (ni->attrs.count(id_CLOCK) == 0) {
@@ -612,6 +638,9 @@ void GowinPacker::run(void)
     ctx->check();
 
     pack_adc();
+    ctx->check();
+
+    pack_gw_jtag();
     ctx->check();
 
     pack_bsram();

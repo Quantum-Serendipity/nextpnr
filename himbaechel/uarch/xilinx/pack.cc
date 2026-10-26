@@ -544,6 +544,7 @@ void XilinxPacker::legalise_muxf_tree(CellInfo *curr, std::vector<CellInfo *> &m
                 pr.cell = curr;
                 pr.port = p;
                 feed_through_lut(pn, {pr});
+                muxf_feed_through_luts++;
                 continue;
             }
             seen_leaves.insert(pn->driver.cell->name);
@@ -645,6 +646,8 @@ void XilinxPacker::pack_muxfs()
         root->cluster = root->name;
         constrain_muxf_tree(root, root, 0);
     }
+    if (muxf_feed_through_luts > 0)
+        log_info("    Created %d feed-through LUTs from MUXF trees\n", muxf_feed_through_luts);
 }
 
 void XilinxPacker::finalise_muxfs()
@@ -1281,19 +1284,17 @@ void XC7Packer::pack_bram()
                 ci->disconnectPort(id_DIPBDIP0);
                 ci->disconnectPort(id_DIPBDIP1);
             }
-            // A width-9 port stores its ninth (parity) bit in the lower half at
-            // even addresses and in the upper half at odd ones, and the upper
-            // half takes it from DIPxDIP1. As with DIxDI1 at width 1, the data
-            // has to be presented on both pins.
+            // At width 9, the upper half of a RAMB36 takes its parity bits from DIPxDIP1.
+            // DIPxDIP1 gets the same net as DIPxDIP0.
             if (int_or_default(ci->params, id_WRITE_WIDTH_A, 0) == 9) {
                 ci->disconnectPort(id_DIPADIP1);
                 ci->connectPort(id_DIPADIP1, ci->getPort(id_DIPADIP0));
-                ci->attrs[ctx->id("X_ORIG_PORT_DIPADIP1")] = std::string("DIPADIP[0]");
+                ci->attrs[id_X_ORIG_PORT_DIPADIP1] = std::string("DIPADIP[0]");
             }
             if (int_or_default(ci->params, id_WRITE_WIDTH_B, 0) == 9) {
                 ci->disconnectPort(id_DIPBDIP1);
                 ci->connectPort(id_DIPBDIP1, ci->getPort(id_DIPBDIP0));
-                ci->attrs[ctx->id("X_ORIG_PORT_DIPBDIP1")] = std::string("DIPBDIP[0]");
+                ci->attrs[id_X_ORIG_PORT_DIPBDIP1] = std::string("DIPBDIP[0]");
             }
             if (int_or_default(ci->params, id_WRITE_WIDTH_B, 0) != 72) {
                 for (std::string s : {"L", "U"}) {

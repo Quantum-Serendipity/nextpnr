@@ -2,6 +2,7 @@ from os import path
 import sys
 
 import importlib.resources
+import itertools
 import gzip
 import re
 import argparse
@@ -36,6 +37,8 @@ CHIP_HAS_I2CCFG             = 0x2000
 CHIP_HAS_5A_DSP             = 0x4000
 CHIP_NEED_BSRAM_DP_CE_FIX   = 0x8000
 CHIP_HAS_5A_HCLK            = 0x10000
+CHIP_HAS_EMPTY_QUADRANT     = 0x20000
+CHIP_HAS_5A_STYLE_IDES      = 0x40000
 
 # Tile flags
 TILE_I3C_CAPABLE_IO        = 0x1
@@ -83,6 +86,7 @@ DLLDLY_Z    = 303 # : 305 reserve for 2 DLLDLYs
 
 PINCFG_Z    = 400
 ADC_Z       = 401
+GW_JTAG_Z      = 402
 
 DSP_Z          = 509
 
@@ -492,24 +496,23 @@ def get_tm_class(db: chipdb, wire: str):
 # u-turn at the rim
 uturnlut = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
 def uturn(db: chipdb, x: int, y: int, wire: str):
-    m = re.match(r"([NESW])([128]\d)(\d)", wire)
-    if m:
-        direction, num, segment = m.groups()
-        # wires wrap around the edges
-        # assumes 0-based indexes
-        if y < 0:
-            y = -1 - y
-            direction = uturnlut[direction]
-        if x < 0:
-            x = -1 - x
-            direction = uturnlut[direction]
-        if y > db.rows - 1:
-            y = 2 * db.rows - 1 - y
-            direction = uturnlut[direction]
-        if x > db.cols - 1:
-            x = 2 * db.cols - 1 - x
-            direction = uturnlut[direction]
-        wire = f'{direction}{num}{segment}'
+    direction, num_segment = wire[0], wire[1:]
+
+    # wires wrap around the edges
+    # assumes 0-based indexes
+    if y < 0:
+        y = -1 - y
+        direction = uturnlut[direction]
+    if x < 0:
+        x = -1 - x
+        direction = uturnlut[direction]
+    if y > db.rows - 1:
+        y = 2 * db.rows - 1 - y
+        direction = uturnlut[direction]
+    if x > db.cols - 1:
+        x = 2 * db.cols - 1 - x
+        direction = uturnlut[direction]
+    wire = direction + num_segment
     return (x, y, wire)
 
 def create_reuse_wire(tt: TileType, name: str, wire_type: str="", const_value: str=""):
@@ -521,15 +524,272 @@ def create_reuse_wire(tt: TileType, name: str, wire_type: str="", const_value: s
     elif wire_type:
         tt.set_wire_type(name, wire_type)
 
+def create_global_nodes(chip: Chip, db: chipdb):
+    ### add nodes from the apicula db """
+    global_nodes = {}
+    for node_name, node_hdr in db.nodes.items():
+        wire_type, node = node_hdr
+        if len(node) < 2:
+            continue
+        # The node is a set, whose order depends on the string hash. Sort it so
+        # that the wire indices and the root wire are the same on every run.
+        node = sorted(node)
+        min_wire_name_len = 0
+        if node:
+            min_wire_name_len = len(next(iter(node))[2])
+        for y, x, wire in node:
+            if wire_type:
+                create_reuse_wire(chip.tile_type_at(x, y), wire, wire_type)
+            new_node = NodeWire(x, y, wire)
+            gl_nodes = global_nodes.setdefault(node_name, [])
+            if new_node not in gl_nodes:
+                if len(wire) < min_wire_name_len:
+                    min_wire_name_len = len(wire)
+                    gl_nodes.insert(0, new_node)
+                else:
+                    gl_nodes.append(new_node)
+
+    for name, node in global_nodes.items():
+        chip.add_node(node)
+
+def create_nodes_with_empty_area(chip: Chip, db: chipdb):
+    """ Currently, only one chip is known to have an "empty" region—the
+    GW5AT-60B.  The unused areas include a rectangular region in the upper left
+    corner, as well as one row and one column, which must be "jumped" when
+    describing inter-cell wires.
+
+     f - normal FPGA cell
+     . - empty cell (no wires etc)
+     x - exactly the same cell as the previous one, but this is the cell whose
+     coordinates we use to describe the empty area
+
+      ......fffff
+      ......fffff
+      ......fffff
+      ffffffx....
+      ffffff.ffff
+      ffffff.ffff
+      ffffff.fff
+
+    Because of this geometry, u-turns and jumps are currently created without
+    code optimization - if u-turns are not important for large LUTs, DSPs and
+    ALUs, the impact of jumps requires research.
+    """
+    X = db.cols
+    Y = db.rows
+    empty_x = db.empty_cell_col
+    empty_y = db.empty_cell_row
+
+    def u_turn_N(src_y, dst_x, dst_y, wire):
+        direction = 'N'
+        num_segment = wire[1:]
+        if dst_y < 0:
+            dst_y =  -dst_y - 1
+            direction = 'S'
+        elif dst_x < empty_x and dst_y < empty_y:
+            dst_y = 2 * empty_y - dst_y - 1
+            direction = 'S'
+        elif dst_x > empty_x and src_y > empty_y and dst_y <= empty_y:
+            # jump
+            dst_y -= 1
+        return (dst_x, dst_y, direction + num_segment)
+
+    def u_turn_S(src_y, dst_x, dst_y, wire):
+        direction = 'S'
+        num_segment = wire[1:]
+        if dst_y > db.rows - 1:
+            dst_y =  2 * db.rows - dst_y - 1
+            direction = 'N'
+        elif dst_x == empty_x and dst_y >= empty_y:
+            dst_y = 2 * empty_y - dst_y - 1
+            direction = 'N'
+        elif dst_x > empty_x and src_y < empty_y and dst_y >= empty_y:
+            # jump
+            dst_y += 1
+        return (dst_x, dst_y, direction + num_segment)
+
+    def u_turn_W(src_x, dst_x, dst_y, wire):
+        direction = 'W'
+        num_segment = wire[1:]
+        if dst_x < 0:
+            dst_x =  -dst_x - 1
+            direction = 'E'
+        elif dst_x < empty_x and dst_y < empty_y:
+            dst_x = 2 * empty_x - dst_x - 1
+            direction = 'E'
+        elif dst_x <= empty_x and src_x > empty_x and dst_y > empty_y:
+            # jump
+            dst_x -= 1
+        return (dst_x, dst_y, direction + num_segment)
+
+    def u_turn_E(src_x, dst_x, dst_y, wire):
+        direction = 'E'
+        num_segment = wire[1:]
+        if dst_x > db.cols - 1:
+            dst_x =  2 * db.cols - dst_x - 1
+            direction = 'W'
+        elif dst_x >= empty_x and dst_y == empty_y:
+            dst_x = 2 * empty_x - dst_x - 1
+            direction = 'W'
+        elif dst_x >= empty_x and src_x < empty_x and dst_y > empty_y:
+            # jump
+            dst_x += 1
+        return (dst_x, dst_y, direction + num_segment)
+
+    nodes = []
+    for x, y in itertools.product(range(X), range(Y)):
+        tt = chip.tile_type_at(x, y)
+        extra_tile_data = tt.extra_data
+        # ignore empty tiles
+        if y == empty_y and x > empty_x:
+            continue
+        # SN and EW
+        for i in [1, 2]:
+            src_wire = f'SN{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                    NodeWire(*u_turn_N(y, x, y - 1, f'N1{i}1')),
+                    NodeWire(*u_turn_S(y, x, y + 1, f'S1{i}1'))])
+            src_wire = f'EW{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                    NodeWire(*u_turn_W(x, x - 1, y, f'W1{i}1')),
+                    NodeWire(*u_turn_E(x, x + 1, y, f'E1{i}1'))])
+
+        # N 1-hop
+        for i in [0, 3]:
+            src_wire = f'N1{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_N(y, x, y - 1, f'N1{i}1'))])
+        # N 2-hop
+        for i in range(8):
+            src_wire = f'N2{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_N(y, x, y - 1, f'N2{i}1')),
+                NodeWire(*u_turn_N(y, x, y - 2, f'N2{i}2'))])
+        # N 4-hop
+        for i in range(4):
+            src_wire = f'N8{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_N(y, x, y - 4, f'N8{i}4')),
+                NodeWire(*u_turn_N(y, x, y - 8, f'N8{i}8'))])
+
+        # S 1-hop
+        for i in [0, 3]:
+            src_wire = f'S1{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_S(y, x, y + 1, f'S1{i}1'))])
+        # S 2-hop
+        for i in range(8):
+            src_wire = f'S2{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_S(y, x, y + 1, f'S2{i}1')),
+                NodeWire(*u_turn_S(y, x, y + 2, f'S2{i}2'))])
+        # S 4-hop
+        for i in range(4):
+            src_wire = f'S8{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_S(y, x, y + 4, f'S8{i}4')),
+                NodeWire(*u_turn_S(y, x, y + 8, f'S8{i}8'))])
+
+        # W 1-hop
+        for i in [0, 3]:
+            src_wire = f'W1{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_W(x, x - 1, y, f'W1{i}1'))])
+        # W 2-hop
+        for i in range(8):
+            src_wire = f'W2{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_W(x, x - 1, y, f'W2{i}1')),
+                NodeWire(*u_turn_W(x, x - 2, y, f'W2{i}2'))])
+        # W 4-hop
+        for i in range(4):
+            src_wire = f'W8{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_W(x, x - 4, y, f'W8{i}4')),
+                NodeWire(*u_turn_W(x, x - 8, y, f'W8{i}8'))])
+
+        # E 1-hop
+        for i in [0, 3]:
+            src_wire = f'E1{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_E(x, x + 1, y, f'E1{i}1'))])
+        # E 2-hop
+        for i in range(8):
+            src_wire = f'E2{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_E(x, x + 1, y, f'E2{i}1')),
+                NodeWire(*u_turn_E(x, x + 2, y, f'E2{i}2'))])
+        # E 4-hop
+        for i in range(4):
+            src_wire = f'E8{i}0'
+            if not tt.has_wire(src_wire):
+                continue
+            nodes.append([NodeWire(x, y, src_wire),
+                NodeWire(*u_turn_E(x, x + 4, y, f'E8{i}4')),
+                NodeWire(*u_turn_E(x, x + 8, y, f'E8{i}8'))])
+
+        # I0 for MUX2_LUT8
+        if x < X - 1 and extra_tile_data.tile_class == chip.strs.id('LOGIC'):
+            dst_x = x + 1
+            if dst_x == empty_x:
+                dst_x += 1
+            if chip.tile_type_at(dst_x, y).extra_data.tile_class == chip.strs.id('LOGIC'):
+                nodes.append([NodeWire(x, y, 'OF30'), NodeWire(dst_x, y, 'OF3')])
+
+        # ALU
+        if extra_tile_data.tile_class == chip.strs.id('LOGIC'):
+            # local carry chain
+            for i in range(5):
+                nodes.append([NodeWire(x, y, f'COUT{i}'),
+                              NodeWire(x, y, f'CIN{i + 1}')]);
+            # global carry chain
+            if x > 1:
+                dst_x = x - 1
+                if dst_x == empty_x:
+                    dst_x -= 1
+                    if y < empty_y:
+                        continue
+                if chip.tile_type_at(x - 1, y).extra_data.tile_class == chip.strs.id('LOGIC'):
+                    nodes.append([NodeWire(x, y, f'CIN0'), NodeWire(dst_x, y, f'COUT5')])
+
+    for node in nodes:
+        chip.add_node(node)
+    create_global_nodes(chip, db)
+
 def create_nodes(chip: Chip, db: chipdb):
     # : (x, y)
     dirs = { 'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0) }
     X = db.cols
     Y = db.rows
-    global_nodes = {}
+    nodes = []
     for y in range(Y):
         for x in range(X):
-            nodes = []
             tt = chip.tile_type_at(x, y)
             extra_tile_data = tt.extra_data
             # SN and EW
@@ -572,31 +832,9 @@ def create_nodes(chip: Chip, db: chipdb):
                     nodes.append([NodeWire(x, y, f'CIN0'),
                                   NodeWire(x - 1, y, f'COUT5')])
 
-            for node in nodes:
-                chip.add_node(node)
-
-    # add nodes from the apicula db
-    for node_name, node_hdr in db.nodes.items():
-        wire_type, node = node_hdr
-        if len(node) < 2:
-            continue
-        min_wire_name_len = 0
-        if node:
-            min_wire_name_len = len(next(iter(node))[2])
-        for y, x, wire in node:
-            if wire_type:
-                create_reuse_wire(chip.tile_type_at(x, y), wire, wire_type)
-            new_node = NodeWire(x, y, wire)
-            gl_nodes = global_nodes.setdefault(node_name, [])
-            if new_node not in gl_nodes:
-                if len(wire) < min_wire_name_len:
-                    min_wire_name_len = len(wire)
-                    gl_nodes.insert(0, new_node)
-                else:
-                    gl_nodes.append(new_node)
-
-    for name, node in global_nodes.items():
+    for node in nodes:
         chip.add_node(node)
+    create_global_nodes(chip, db)
 
 def create_switch_matrix(tt: TileType, db: chipdb, x: int, y: int):
     def get_wire_type(name):
@@ -790,7 +1028,7 @@ def create_extra_funcs(tt: TileType, db: chipdb, x: int, y: int):
                 tt.extra_data.io16_x_off = x_off
                 tt.extra_data.io16_y_off = y_off
 
-            for io_type, z in {('IDES16', IDES16_Z), ('OSER16', OSER16_Z)}:
+            for io_type, z in (('IDES16', IDES16_Z), ('OSER16', OSER16_Z)):
                 bel = tt.create_bel(io_type, io_type, z = z)
                 portmap = db[y, x].bels[io_type].portmap
                 for port, wire in portmap.items():
@@ -911,6 +1149,14 @@ def create_extra_funcs(tt: TileType, db: chipdb, x: int, y: int):
                     else:
                         create_reuse_wire(tt, wire, "HCLK")
                     tt.add_bel_pin(clkdiv, pin, wire, PinType.INPUT)
+        elif func == 'jtag':
+            jtag = tt.create_bel("GW_JTAG", "GW_JTAG", z = GW_JTAG_Z)
+            for pin, wire in desc['outputs'].items():
+                create_reuse_wire(tt, wire, "")
+                tt.add_bel_pin(jtag, pin, wire, PinType.OUTPUT)
+            for pin, wire in desc['inputs'].items():
+                create_reuse_wire(tt, wire, "")
+                tt.add_bel_pin(jtag, pin, wire, PinType.INPUT)
 
 def set_wire_flags(tt: TileType, tdesc: TypeDesc):
     if tdesc.extra_func and 'clock_gates' in tdesc.extra_func:
@@ -1036,10 +1282,10 @@ def create_io_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc:
             tt.add_bel_pin(io, "BOTTOM_IO_PORT_A", portmap['BOTTOM_IO_PORT_A'], PinType.INPUT)
             tt.add_bel_pin(io, "BOTTOM_IO_PORT_B", portmap['BOTTOM_IO_PORT_B'], PinType.INPUT)
     # create IOLOGIC bels if any
-    for idx, name in {(IOLOGICA_Z, 'IOLOGICA'), (IOLOGICA_Z + 1, 'IOLOGICB')}:
+    for idx, name in ((IOLOGICA_Z, 'IOLOGICA'), (IOLOGICA_Z + 1, 'IOLOGICB')):
         if name not in db[y, x].bels:
             continue
-        for off, io_type in {(0, 'O'), (2, 'I')}:
+        for off, io_type in ((0, 'O'), (2, 'I')):
             iol = tt.create_bel(f"{name}{io_type}", f"IOLOGIC{io_type}", z = idx + off)
             for port, wire in db[y, x].bels[name].portmap.items():
                 if port == 'FCLK': # XXX compatibility
@@ -1048,7 +1294,7 @@ def create_io_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc:
                     create_reuse_wire(tt, wire, "TILE_CLK")
                 else:
                     create_reuse_wire(tt, wire, "")
-                if port in {'Q', 'Q0', 'Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9', 'DF', 'LAG', 'LEAD'}:
+                if port in {'Q', 'Q0', 'Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9', 'Q10', 'Q11', 'Q12', 'Q13', 'Q14', 'Q15', 'DF', 'LAG', 'LEAD'}:
                     tt.add_bel_pin(iol, port, wire, PinType.OUTPUT)
                 else:
                     tt.add_bel_pin(iol, port, wire, PinType.INPUT)
@@ -1184,7 +1430,7 @@ def create_ssram_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tde
     return tt
 
 # BSRAM
-_bsram_inputs = {'CLK', 'OCE', 'CE', 'RESET', 'WRE'}
+_bsram_inputs = ('CLK', 'OCE', 'CE', 'RESET', 'WRE')
 def create_bsram_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc: TypeDesc):
     typename = "BSRAM"
     tiletype = f"{typename}_{ttyp}"
@@ -1197,7 +1443,7 @@ def create_bsram_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tde
     bsram = tt.create_bel("BSRAM", "BSRAM", z = BSRAM_Z)
 
 
-    for sfx in {'', 'A', 'B'}:
+    for sfx in ('', 'A', 'B'):
         for inp in _bsram_inputs:
             add_port_wire(tt, bsram, portmap, f"{inp}{sfx}", "BSRAM_I", PinType.INPUT)
         for idx in range(3):
@@ -1241,7 +1487,7 @@ def create_dsp_5a_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, td
         portmap = db[y, x].bels[belname].portmap
         dsp = tt.create_bel(belname, "MULT12X12", eval(f'MULT12X12_{idx}_Z'))
 
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(12):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
         for inp in range(2):
@@ -1256,7 +1502,7 @@ def create_dsp_5a_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, td
     portmap = db[y, x].bels[belname].portmap
     dsp = tt.create_bel(belname, "MULTALU27X18", MULTALU27X18_Z)
 
-    for sfx, qnt in {('A', 27) , ('B', 18), ('C', 48), ('D', 26)}:
+    for sfx, qnt in (('A', 27) , ('B', 18), ('C', 48), ('D', 26)):
         for inp in range(qnt):
             add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
     for inp in range(2):
@@ -1278,7 +1524,7 @@ def create_dsp_5a_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, td
     portmap = db[y, x].bels[belname].portmap
     dsp = tt.create_bel(belname, "MULTADDALU12X12", MULTADDALU12X12_Z)
 
-    for sfx in {'A', 'B'}:
+    for sfx in ('A', 'B'):
         for mult in range(2):
             for inp in range(12):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{mult}{inp}", "DSP_I", PinType.INPUT)
@@ -1296,7 +1542,7 @@ def create_dsp_5a_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, td
     return tt
 
 # DSP
-_mult_inputs = {'ASEL', 'BSEL', 'ASIGN', 'BSIGN'}
+_mult_inputs = ('ASEL', 'BSEL', 'ASIGN', 'BSIGN')
 def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc: TypeDesc):
     typename = "DSP"
     tiletype = f"{typename}_{ttyp}"
@@ -1324,7 +1570,7 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         dsp = tt.create_bel(belname, "PADD9", eval(f'PADD9_{mac}_{idx}_Z'))
 
         add_port_wire(tt, dsp, portmap, "ADDSUB", "DSP_I", PinType.INPUT)
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(9):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
         for inp in range(9):
@@ -1343,7 +1589,7 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         dsp = tt.create_bel(belname, "PADD18", eval(f'PADD18_{mac}_{idx}_Z'))
 
         add_port_wire(tt, dsp, portmap, "ADDSUB", "DSP_I", PinType.INPUT)
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(18):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
         for inp in range(18):
@@ -1363,7 +1609,7 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         portmap = db[y, x].bels[belname].portmap
         dsp = tt.create_bel(belname, "MULT9X9", eval(f'MULT9X9_{mac}_{idx}_Z'))
 
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(9):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
         for inp in _mult_inputs:
@@ -1381,7 +1627,7 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         portmap = db[y, x].bels[belname].portmap
         dsp = tt.create_bel(belname, "MULT18X18", eval(f'MULT18X18_{mac}_{idx}_Z'))
 
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(18):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
         for inp in _mult_inputs:
@@ -1404,10 +1650,10 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
     add_port_wire(tt, dsp, db[y, x].bels['MULT18X1801'].portmap, 'BSIGN', "DSP_I", PinType.INPUT, 'ZERO_BSIGN1')
     add_port_wire(tt, dsp, db[y, x].bels['MULT18X1810'].portmap, 'ASIGN', "DSP_I", PinType.INPUT, 'ZERO_ASIGN1')
     for i in range(2):
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(36):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}{i}", "DSP_I", PinType.INPUT)
-        for inp in {'ASIGN', 'BSIGN'}:
+        for inp in ('ASIGN', 'BSIGN'):
             add_port_wire(tt, dsp, portmap, f"{inp}{i}", "DSP_I", PinType.INPUT)
         for inp in range(4):
             add_port_wire(tt, dsp, portmap, f"CE{inp}{i}", "DSP_I", PinType.INPUT)
@@ -1422,10 +1668,10 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         portmap = db[y, x].bels[belname].portmap
         dsp = tt.create_bel(belname, "ALU54D", eval(f'ALU54D_{mac}_Z'))
 
-        for sfx in {'A', 'B'}:
+        for sfx in ('A', 'B'):
             for inp in range(54):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
-        for inp in {'ASIGN', 'BSIGN'}:
+        for inp in ('ASIGN', 'BSIGN'):
             add_port_wire(tt, dsp, portmap, inp, "DSP_I", PinType.INPUT)
         for inp in range(4):
             add_port_wire(tt, dsp, portmap, f"CE{inp}", "DSP_I", PinType.INPUT)
@@ -1444,12 +1690,12 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         dsp = tt.create_bel(belname, "MULTALU18X18", eval(f'MULTALU18X18_{mac}_Z'))
 
         for i in range(2):
-            for sfx in {'ASIGN', 'BSIGN'}:
+            for sfx in ('ASIGN', 'BSIGN'):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{i}", "DSP_I", PinType.INPUT)
-            for sfx in {'A', 'B'}:
+            for sfx in ('A', 'B'):
                 for inp in range(18):
                     add_port_wire(tt, dsp, portmap, f"{sfx}{inp}{i}", "DSP_I", PinType.INPUT)
-        for sfx in {'C', 'D'}:
+        for sfx in ('C', 'D'):
             for inp in range(54):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{inp}", "DSP_I", PinType.INPUT)
         add_port_wire(tt, dsp, portmap, "DSIGN", "DSP_I", PinType.INPUT)
@@ -1469,7 +1715,7 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         dsp = tt.create_bel(belname, "MULTALU36X18", eval(f'MULTALU36X18_{mac}_Z'))
 
         for i in range(2):
-            for sfx in {'ASIGN', 'BSIGN'}:
+            for sfx in ('ASIGN', 'BSIGN'):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{i}", "DSP_I", PinType.INPUT)
             for inp in range(18):
                 add_port_wire(tt, dsp, portmap, f"A{inp}{i}", "DSP_I", PinType.INPUT)
@@ -1493,7 +1739,7 @@ def create_dsp_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tdesc
         dsp = tt.create_bel(belname, "MULTADDALU18X18", eval(f'MULTADDALU18X18_{mac}_Z'))
 
         for i in range(2):
-            for sfx in {'ASIGN', 'BSIGN', 'ASEL', 'BSEL'}:
+            for sfx in ('ASIGN', 'BSIGN', 'ASEL', 'BSEL'):
                 add_port_wire(tt, dsp, portmap, f"{sfx}{i}", "DSP_I", PinType.INPUT)
             for inp in range(18):
                 add_port_wire(tt, dsp, portmap, f"A{inp}{i}", "DSP_I", PinType.INPUT)
@@ -1669,10 +1915,10 @@ def create_extra_data(chip: Chip, db: chipdb, chip_flags: int):
     # create HCLK<->IO and HCLK<->CLKDIV2
     if hasattr(db, "io2hclk"):
         for hclk_idx, ios in db.io2hclk.items():
-            for row_col in ios:
+            for row_col in sorted(ios):
                 chip.extra_data.add_io2hclk(hclk_idx, row_col[1], row_col[0])
         for hclk_idx, div2 in db.hclk_div2.items():
-            for row_col_idx in div2:
+            for row_col_idx in sorted(div2):
                 chip.extra_data.add_hclkdiv2(hclk_idx, row_col_idx[1], row_col_idx[0], row_col_idx[2] + CLKDIV2_0_Z)
 
 def create_timing_info(chip: Chip, db: chipdb.Device):
@@ -1707,6 +1953,11 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                 lut.add_comb_arc("I1", "F", group_to_timingvalue(arc["b_f"]))
                 lut.add_comb_arc("I2", "F", group_to_timingvalue(arc["c_f"]))
                 lut.add_comb_arc("I3", "F", group_to_timingvalue(arc["d_f"]))
+                # Yosys also emits LUT1 to LUT3. Their inputs sit on the same bel pins as LUT4.
+                for n in range(1, 4):
+                    lutn = tmg.add_cell_variant(speed, f"LUT{n}")
+                    for i, g in enumerate(("a_f", "b_f", "c_f")[:n]):
+                        lutn.add_comb_arc(f"I{i}", "F", group_to_timingvalue(arc[g]))
                 mux5 = tmg.add_cell_variant(speed, "MUX2_LUT5")
                 mux5.add_comb_arc("I0", "O", group_to_timingvalue(arc["m0_ofx0"]))
                 mux5.add_comb_arc("I1", "O", group_to_timingvalue(arc["m1_ofx1"]))
@@ -1740,7 +1991,7 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                         sram.add_comb_arc(f"RAD[{rad}]", f"DO[{do}]", group_to_timingvalue(arc[f"rad{rad}_do"]))
                     sram.add_clock_out("CLK", f"DO[{do}]", ClockEdge.RISING, group_to_timingvalue(arc["clk_do"]))
                 for di in range(4):
-                    sram.add_setup_hold("CLK", f"DI[{di}", ClockEdge.RISING, group_to_timingvalue(arc["clk_di_set"]), group_to_timingvalue(arc["clk_di_hold"]))
+                    sram.add_setup_hold("CLK", f"DI[{di}]", ClockEdge.RISING, group_to_timingvalue(arc["clk_di_set"]), group_to_timingvalue(arc["clk_di_hold"]))
                 sram.add_setup_hold("CLK", "WRE", ClockEdge.RISING, group_to_timingvalue(arc["clk_wre_set"]), group_to_timingvalue(arc["clk_wre_hold"]))
                 for wad in range(4):
                     sram.add_setup_hold("CLK", f"WAD[{wad}]", ClockEdge.RISING, group_to_timingvalue(arc[f"clk_wad{wad}_set"]), group_to_timingvalue(arc[f"clk_wad{wad}_hold"]))
@@ -1777,8 +2028,8 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
             elif group == "bram":
                 for sp_type in ("SP", "SPX9"):
                     sp = tmg.add_cell_variant(speed, sp_type)
-                    add_bram_bus_output(sp, "CLK", "DO", 36 if sp_type == "SPX9" else 32, "clk_do_bypass")
-                    add_bram_bus_input(sp, "CLK", "DI", 36 if sp_type == "SPX9" else 32, "clk_di")
+                    add_bram_bus_output(sp, "CLK", "DO", 36, "clk_do_bypass")
+                    add_bram_bus_input(sp, "CLK", "DI", 36, "clk_di")
                     add_bram_bus_input(sp, "CLK", "AD", 14, "clk_ad")
                     add_bram_bus_input(sp, "CLK", "BLKSEL", 3, "clk_blksel")
 
@@ -1786,8 +2037,8 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                         sp.add_setup_hold("CLK", sig, ClockEdge.RISING, group_to_timingvalue(arc[f"clk_{sig.lower()}_set"]), group_to_timingvalue(arc[f"clk_{sig.lower()}_hold"]))
                 for sdp_type in ("SDP", "SDPX9", "SDPB", "SDPX9B"):
                     sdp = tmg.add_cell_variant(speed, sdp_type)
-                    add_bram_bus_output(sdp, "CLKB", "DO", 36 if sdp_type.startswith("SDPX9") else 32, "clkb_do_bypass")
-                    add_bram_bus_input(sdp, "CLKA", "DI", 36 if sdp_type.startswith("SDPX9") else 32, "clka_di")
+                    add_bram_bus_output(sdp, "CLKB", "DO", 36, "clkb_do_bypass")
+                    add_bram_bus_input(sdp, "CLKA", "DI", 36, "clka_di")
                     add_bram_bus_input(sdp, "CLKA", "ADA", 14, "clka_ada")
                     add_bram_bus_input(sdp, "CLKB", "ADB", 14, "clkb_adb")
 
@@ -1802,10 +2053,10 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
 
                 for dp_type in ("DP", "DPX9", "DPB", "DPX9B"):
                     dp = tmg.add_cell_variant(speed, dp_type)
-                    add_bram_bus_output(dp, "CLKA", "DOA", 36 if dp_type.startswith("DPX9") else 32, "clka_doa_bypass")
-                    add_bram_bus_output(dp, "CLKB", "DO", 36 if dp_type.startswith("DPX9") else 32, "clkb_dob_bypass")
-                    add_bram_bus_input(dp, "CLKA", "DIA", 36 if dp_type.startswith("DPX9") else 32, "clka_dia")
-                    add_bram_bus_input(dp, "CLKB", "DIB", 36 if dp_type.startswith("DPX9") else 32, "clkb_dib")
+                    add_bram_bus_output(dp, "CLKA", "DOA", 36, "clka_doa_bypass")
+                    add_bram_bus_output(dp, "CLKB", "DOB", 36, "clkb_dob_bypass")
+                    add_bram_bus_input(dp, "CLKA", "DIA", 36, "clka_dia")
+                    add_bram_bus_input(dp, "CLKB", "DIB", 36, "clkb_dib")
                     add_bram_bus_input(dp, "CLKA", "ADA", 14, "clka_ada")
                     add_bram_bus_input(sp, "CLKB", "ADB", 14, "clkb_adb")
 
@@ -1906,6 +2157,10 @@ def main():
             chip_flags |= CHIP_HAS_5A_DSP;
         if "HAS_5A_HCLK" in db.chip_flags:
             chip_flags |= CHIP_HAS_5A_HCLK;
+        if "HAS_EMPTY_QUADRANT" in db.chip_flags:
+            chip_flags |= CHIP_HAS_EMPTY_QUADRANT;
+        if "HAS_5A_IDES" in db.chip_flags:
+            chip_flags |= CHIP_HAS_5A_STYLE_IDES
 
     X = db.cols;
     Y = db.rows;
@@ -1955,7 +2210,11 @@ def main():
                 create_tiletype(create_null_tiletype, ch, db, x, y, ttyp)
 
     # Create nodes between tiles
-    create_nodes(ch, db)
+    if "HAS_EMPTY_QUADRANT" in db.chip_flags:
+        create_nodes_with_empty_area(ch, db)
+    else:
+        create_nodes(ch, db)
+
     create_extra_data(ch, db, chip_flags)
     create_timing_info(ch, db)
     ch.write_bba(args.output)

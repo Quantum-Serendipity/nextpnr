@@ -273,26 +273,36 @@ CellInfo *GowinPacker::create_aux_iologic_cell(CellInfo &ci, IdString mode, bool
 
 void GowinPacker::reconnect_ides_outs(CellInfo *ci)
 {
-    IdString dest_ports[] = {id_Q9, id_Q8, id_Q7, id_Q6, id_Q5, id_Q4, id_Q3, id_Q2};
+    IdString dest_ports[] = {id_Q15, id_Q14, id_Q13, id_Q12, id_Q11, id_Q10, id_Q9, id_Q8,
+                             id_Q7,  id_Q6,  id_Q5,  id_Q4,  id_Q3,  id_Q2,  id_Q1, id_Q0};
+
+    bool gw5a = gwu.has_5A_IDES();
+    int base = gw5a ? 0 : 6;
+
     switch (ci->type.hash()) {
     case ID_IDDR: /* fall-through*/
     case ID_IDDRC:
-        ci->renamePort(id_Q1, id_Q9);
-        ci->renamePort(id_Q0, id_Q8);
+        ci->renamePort(id_Q1, dest_ports[base]);
+        ci->renamePort(id_Q0, dest_ports[base + 1]);
         break;
     case ID_IDES4:
         for (int i = 0; i < 4; ++i) {
-            ci->renamePort(ctx->idf("Q%d", 3 - i), dest_ports[i]);
+            ci->renamePort(ctx->idf("Q%d", 3 - i), dest_ports[i + (gw5a ? 4 : base)]);
         }
         break;
     case ID_IVIDEO:
         for (int i = 0; i < 7; ++i) {
-            ci->renamePort(ctx->idf("Q%d", 6 - i), dest_ports[i]);
+            ci->renamePort(ctx->idf("Q%d", 6 - i), dest_ports[i + (gw5a ? 1 : base)]);
         }
         break;
     case ID_IDES8:
         for (int i = 0; i < 8; ++i) {
-            ci->renamePort(ctx->idf("Q%d", 7 - i), dest_ports[i]);
+            ci->renamePort(ctx->idf("Q%d", 7 - i), dest_ports[i + base]);
+        }
+        break;
+    case ID_IDES10:
+        for (int i = 0; i < 10; ++i) {
+            ci->renamePort(ctx->idf("Q%d", 9 - i), dest_ports[i + base]);
         }
         break;
     default:

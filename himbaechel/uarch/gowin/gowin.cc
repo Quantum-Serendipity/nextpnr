@@ -163,7 +163,7 @@ void GowinImpl::init_database(Arch *arch)
             std::smatch match;
             if (std::regex_match(args.device, match, devicere)) {
                 family = stringf("GW5A%s-%s%s", match[1].str().c_str(), match[2].str().c_str(),
-                                 match[2].str() == "25" ? "A" : "C");
+                                 match[2].str() == "25" ? "A" : (match[2].str() == "60" ? "B" : "C"));
             } else {
                 std::regex devicere = std::regex("GW1N([SZ]?)[A-Z]*-(LV|UV|UX)([0-9])(C?).*");
                 std::smatch match;
@@ -1247,6 +1247,9 @@ void GowinImpl::create_passthrough_luts(void)
                 ci->connectPorts(id_D, lut, id_F);
 
                 ctx->bindBel(lut_bel, lut, PlaceStrength::STRENGTH_LOCKED);
+                // assignArchInfo() has run already, without the timing index the LUT is not timed
+                if (ctx->speed_grade)
+                    lut->timing_index = ctx->get_cell_timing_idx(id_LUT4);
                 new_cells.push_back(std::move(lut_cell));
             }
         }

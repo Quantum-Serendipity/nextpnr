@@ -315,11 +315,6 @@ bool Arch::route()
         Router2Cfg cfg(getCtx());
         uarch->configureRouter2(cfg);
         router2(getCtx(), cfg);
-        // router2 does not run a final timing analysis itself (unlike
-        // router1): run it here so fmax/slack are reported and the timing
-        // results are populated for --report and downstream consumers.
-        timing_analysis(getCtx(), true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
-                        true /* warn_on_failure */, true /* update_results */);
         result = true;
     } else {
         log_error("Himbächel architecture does not support router '%s'\n", router.c_str());
@@ -450,7 +445,7 @@ const std::vector<std::string> Arch::availableRouters = {"default", "router1", "
 
 void Arch::set_fast_pip_delays(bool fast_mode)
 {
-    if (fast_mode && !fast_pip_delays) {
+    if (!fast_mode && fast_pip_delays) {
         // Have to rebuild these structures
         drive_res.clear();
         load_cap.clear();

@@ -1698,15 +1698,15 @@ class HeAPPlacer
             auto loc = [&](CellInfo *c, int &x, int &y) -> bool {
                 if (c == nullptr)
                     return false;
-                auto it = p->cell_locs.find(c->name);
-                const bool cell_has_location = it != p->cell_locs.end();
+                const bool cell_has_location = c->udata >= 0 && size_t(c->udata) < p->cell_locs.size();
                 if (!cell_has_location)
                     return false;
+                const CellLocation &cl = p->cell_locs.at(c->udata);
                 // Locked and pseudo cells keep the location of a bel that
                 // build_fast_bels never saw (it skips bound bels), so they are
                 // not bounded by max_x/max_y the way solved cells are.
-                x = std::max(0, std::min(p->max_x, it->second.x));
-                y = std::max(0, std::min(p->max_y, it->second.y));
+                x = std::max(0, std::min(p->max_x, cl.x));
+                y = std::max(0, std::min(p->max_y, cl.y));
                 return true;
             };
             for (auto &net_pair : ctx->nets) {

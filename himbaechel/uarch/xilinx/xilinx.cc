@@ -1119,6 +1119,7 @@ void XilinxImpl::postPlace()
         log_info("timing-opt: radius %d tiles, %d rounds\n", cfg.radius, cfg.iterations);
         timing_opt(ctx, cfg);
     }
+    refine_sparse_bels();
     fixup_placement();
     ctx->assignArchInfo();
     check_user_bels();

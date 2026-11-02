@@ -18,6 +18,7 @@ set(SOURCES
     part_resources.cc
     pins.cc
     pins.h
+    replicate.cc
     sparse_refine.cc
     xdc.cc
     xilinx.cc

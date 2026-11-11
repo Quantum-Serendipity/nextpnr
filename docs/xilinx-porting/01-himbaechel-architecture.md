@@ -239,8 +239,16 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   - Node timing: `NodeTimingPOD` (`cap`/`res`/`delay`) for merged cross-tile nodes
     (`gen/xilinx_gen.py:409-447`).
   - Cell timing: `CellTimingPOD`/`CellPinTimingPOD` with comb arcs and reg arcs
-    (setup/hold/clk_q) — LUT/FF stubbed in `xilinx_gen.py:450-462`; SELMUX2_1, CARRY4 and
-    BRAM imported from prjxray SDF (`xilinx_gen.py:464-474`).
+    (setup/hold/clk_q) — LUT and FF from fixed figures in `xilinx_gen.py` (on virtex7 the
+    Vivado-oracle values of `docs/extracted-timing.md`); SELMUX2_1, CARRY4 and BRAM imported
+    from prjxray SDF. RAMB36 arcs name the packed cell's CLKARDCLKL/CLKBWRCLKL clock pins.
+  - **Silicon calibration** (`gen/xilinx_gen.py --timing-cal <json>`, optional, on the X-Ray
+    delays, not on a timing directory's): per wire class a factor on pip delay, output
+    resistance and node resistance; a fixed cost per use of fan and bypass pips; and a stage
+    cost per physical LUT pin, carried on the permutation pips (`LUTPIN<j>`) and the pin's LUT
+    arc, with route-throughs priced by input pin (`LUTRT<j>`). Unknown keys in the JSON are
+    refused. Without the option the chipdb is unchanged. Data for xc7vx485t-2:
+    openXC7/prjxray-db `virtex7/timings/silicon/xc7vx485t-2.cal.json`.
 - **Speed grades**: with X-Ray's delays alone there is one, `DEFAULT`, for every part.
   With a timing directory (`HIMBAECHEL_XILINX_TIMING`, `xilinx_gen.py --timing`,
   `gen/xilinx_timing.py`) the chipdb has every grade the directory has (`1`, `2`, `2L`,
@@ -363,9 +371,9 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **SRL Q31 out of a slice needs the A LUT when Q reads another address** — only the A LUT's
   `MC31` reaches `DOUTMUX`; a cell already locked above the A LUT, or in another cluster, is a
   packer error (`pack.cc:927-961`).
-- **Routing delay model is deliberately coarse** — `xilinx.cc:767` and `:778`
-  (`TODO: improve sophistication here based on old nextpnr-xilinx code`); pip/placer delay
-  estimates are heuristics.
+- **Routing delay model is deliberately coarse** — `xilinx.cc` (`TODO: improve sophistication
+  here based on old nextpnr-xilinx code`); the placer's delay estimates are heuristics. Routed
+  delays come from the chipdb, which `--timing-cal` can calibrate from silicon (above).
 - **LUT permutation/routethru special-cases** — `xilinx.cc:291,293` (`FIXME: conflict with
   ground`, `FIXME: routethru to MUX`).
 - **Carry feed-through inefficiency** — `pack_carry.cc:280` (`FIXME: in multiple fanout cases,
@@ -377,12 +385,15 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **Missing pseudo-pips** — `fasm.cc:306` (`FIXME: PPIPs missing for DSPs`), `fasm.cc:312`
   (`FIXME: PPIPs missing for SING IOI3s`), `fasm.cc:224` (`FIXME: shouldn't these be in the
   X-RAY ppips database?`).
-- **Timing database gaps** — without a timing directory, single `DEFAULT` speed grade, stubbed LUT/FF
-  timing (`xilinx_gen.py:450-462`), `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
+- **Timing database gaps** — without a timing directory, single `DEFAULT` speed grade, fixed LUT/FF
+  figures unless `--timing-cal` gives per-pin LUT costs, no CARRY4 DI arcs, `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
   artix7 timing), `xilinx_gen.py:276` (`TODO: anything other than comb` in SDF import),
   `xilinx_gen.py:485` (`TODO: bank` for pads).
 - **RapidWright-alignment hacks** — `fixup_routing` re-encodes LUT input permutations into
-  `X_ORIG_PORT` attributes to keep Vivado/RapidWright happy (`xilinx_place.cc:512-625`);
+  `X_ORIG_PORT` attributes to keep Vivado/RapidWright happy (`xilinx_place.cc`), and re-binds
+  each permuted input's route to the identity pip of its physical pin (once, when several
+  logical pins share one) so route delay and the SDF follow the remapped port; `postRoute`
+  then runs timing analysis again;
   `fixup_placement` remaps LUT5/LUT6 physical inputs post-place (`xilinx_place.cc:389-481`).
 - **Other** — `xilinx_device.py:425` (`FIXME: tied_value`), `:435` (`FIXME: pip/wire delays`);
   DSP constant-pin handling comments (`pack_dsp_xc7.cc:146`).
@@ -395,6 +406,6 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
   kintex7 in the default list; no UltraScale(+) in this uarch (separate ng-ultra effort).
 - Constraints: only `set_property`/`create_clock` on ports/nets; no I/O timing, multicycle,
   false-path, generated clocks, or cell/pin targets.
-- Timing: without a timing directory, single speed grade and stub LUT/FF delays; no
-  timing-driven post-placement optimisation.
+- Timing: without a timing directory, single speed grade and fixed LUT/FF delays (per-pin
+  LUT costs with `--timing-cal`); no timing-driven post-placement optimisation.
 - Tests/CI: no xilinx unit tests, no chipdb/P&R regression in upstream CI.

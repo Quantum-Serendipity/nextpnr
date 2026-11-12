@@ -90,8 +90,10 @@ void XilinxPacker::xform_cell(const dict<IdString, XFormRule> &rules, CellInfo *
     for (auto &param : ci->params)
         if (rule.param_xform.count(param.first))
             xform_params.push_back(param.first);
-    for (auto param : xform_params)
-        ci->params[rule.param_xform.at(param)] = ci->params[param];
+    for (auto param : xform_params) {
+        auto param_value = ci->params[param];
+        ci->params[rule.param_xform.at(param)] = param_value;
+    }
 
     for (auto &attr : rule.set_attrs)
         ci->attrs[attr.first] = attr.second;
@@ -401,7 +403,7 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     auto process_cell = [&](const CellInfo *cell) {
         if (cell->constr_x != lut->constr_x || cell->constr_y != lut->constr_y)
             return;
-        if (cell->type == id_SLICE_LUTX && cell->getPort(id_CLK)) {
+        if (cell->type == id_SLICE_LUTX && (bool_or_default(cell->attrs, id_X_LUT_AS_SRL) || bool_or_default(cell->attrs, id_X_LUT_AS_DRAM))) {
             found_wclk = true;
             clk = cell->getPort(id_CLK);
             wclk_inv = bool_or_default(cell->params, id_IS_WCLK_INVERTED, false);
@@ -685,6 +687,33 @@ void XilinxPacker::pack_srls()
     srl_rules[id_SRLC32E].port_xform[id_Q31] = id_MC31;
     srl_rules[id_SRLC32E].param_xform[id_IS_CLK_INVERTED] = id_IS_WCLK_INVERTED;
     srl_rules[id_SRLC32E].set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
+    // SRLC16E is the 16-deep cascade primitive. It is not a constid: interning
+    // the name on a design that has none would shift every later id. The
+    // netlist has already interned it when a cell of that type is present.
+    // Same mapping as SRL16E (D on DI2, Q on O6, A6 and A1 tied high, so the
+    // shift register sits in the upper half of the LUT) plus Q15 on MC31,
+    // which is the A6LUT output that leaves the slice through DOUTMUX.
+    bool seen_srlc16e = false;
+    IdString srlc16e_type;
+    for (auto &cell : ctx->cells) {
+        const bool is_srlc16e = cell.second->type.str(ctx) == "SRLC16E";
+        if (is_srlc16e) {
+            seen_srlc16e = true;
+            srlc16e_type = cell.second->type;
+        }
+    }
+    const bool any_srlc16e = seen_srlc16e;
+    if (any_srlc16e) {
+        XFormRule &rule = srl_rules[srlc16e_type];
+        rule.new_type = id_SLICE_LUTX;
+        rule.port_xform[id_CLK] = id_CLK;
+        rule.port_xform[id_CE] = id_WE;
+        rule.port_xform[id_D] = id_DI2;
+        rule.port_xform[id_Q] = id_O6;
+        rule.port_xform[ctx->id("Q15")] = id_MC31;
+        rule.param_xform[id_IS_CLK_INVERTED] = id_IS_WCLK_INVERTED;
+        rule.set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
+    }
     generic_xform(srl_rules, true);
     // Fixup SRL inputs
     for (auto &cell : ctx->cells) {
@@ -692,7 +721,8 @@ void XilinxPacker::pack_srls()
         if (ci->type != id_SLICE_LUTX)
             continue;
         std::string orig_type = str_or_default(ci->attrs, id_X_ORIG_TYPE);
-        if (orig_type == "SRL16E") {
+        const bool is_srl16 = orig_type == "SRL16E" || orig_type == "SRLC16E";
+        if (is_srl16) {
             for (int i = 3; i >= 0; i--) {
                 ci->renamePort(ctx->id("A" + std::to_string(i)), ctx->id("A" + std::to_string(i + 2)));
             }
@@ -701,7 +731,9 @@ void XilinxPacker::pack_srls()
                 ci->ports[tp].type = PORT_IN;
                 ci->connectPort(tp, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
             }
-        } else if (orig_type == "SRLC32E") {
+        }
+        const bool is_srl32 = orig_type == "SRLC32E";
+        if (is_srl32) {
             for (int i = 4; i >= 0; i--) {
                 ci->renamePort(ctx->id("A" + std::to_string(i)), ctx->id("A" + std::to_string(i + 2)));
             }
@@ -712,22 +744,42 @@ void XilinxPacker::pack_srls()
             }
         }
     }
+    // Q15 leaves only from an A6LUT: that LUT's MC31 is the DOUTMUX input
+    // that drives the DMUX site port. A Q15 with no users stays a plain
+    // SRL16 and can sit in any SLICEM letter.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_packed_srlc16e =
+                ci->type == id_SLICE_LUTX && str_or_default(ci->attrs, id_X_ORIG_TYPE) == "SRLC16E";
+        if (is_packed_srlc16e) {
+            NetInfo *q15 = ci->getPort(id_MC31);
+            const bool q15_used = q15 != nullptr && !q15->users.empty();
+            if (q15_used) {
+                const bool already_locked = ci->cluster != ClusterId() || ci->constr_abs_z;
+                const bool free_to_lock = !already_locked;
+                if (free_to_lock) {
+                    ci->cluster = ci->name;
+                    ci->constr_abs_z = true;
+                    ci->constr_z = (0 << 4) | BEL_6LUT;
+                }
+            }
+        }
+    }
     constrain_srl_cascades();
 }
 
 // SRLC32E cascades (shift registers deeper than 32, chained through Q31).
-// The MC31 wire Q31 maps to only exists INSIDE a SLICEM: the cascade muxes
-// run top-down D->C->B->A (xDI1MUX <- (x+1)MC31) and no route from MC31 to
-// the general fabric exists.  Two consequences the packer must handle, or
-// the placer scatters the chain and the MC31 arc is physically unroutable:
+// MC31 of the B, C and D LUTs only feeds the downward DI1 cascade
+// (xDI1MUX <- (x+1)MC31). MC31 of the A LUT is the DOUTMUX input, so that
+// one output can leave the slice. Two consequences, or the placer scatters
+// the chain and the MC31 arc is physically unroutable:
 //
 //  - a cascade group of up to four SRLs must occupy D,C,B,A of ONE slice,
 //    exactly like a carry chain (cluster, head at D);
-//  - any Q31 link that cannot stay inside a slice (fifth and later chain
-//    elements, or a Q31 consumer that is not another SRL's D) must instead
-//    leave through the ordinary Q output with the read address tied to 31
-//    -- the same value, fabric-routable.  Only possible when Q is unused,
-//    but a used Q means the design also taps that segment live.
+//  - a Q31 link that cannot stay inside a slice leaves through DOUTMUX when
+//    Q is also used, which means the cell has to sit on the A LUT. When Q
+//    is unused the old rewrite stays: the link moves onto Q and the read
+//    address is tied to 31.
 //
 // (Port of nextpnr-xilinx pack.cc constrain_srl_cascades(); the fork's
 // constr_parent/constr_children grouping is re-expressed with the upstream
@@ -845,6 +897,7 @@ void XilinxPacker::constrain_srl_cascades()
     }
 
     int rewired = 0;
+    int fabric = 0;
     for (auto ci : offslice) {
         NetInfo *q31 = ci->getPort(id_MC31);
         if (q31 == nullptr)
@@ -854,9 +907,10 @@ void XilinxPacker::constrain_srl_cascades()
             continue;
         }
         NetInfo *q = ci->getPort(id_O6);
-        bool q_output_is_used = q != nullptr && !q->users.empty();
+        const bool q_output_is_used = q != nullptr && !q->users.empty();
         if (q_output_is_used) {
-            if (reads_bit31(ci)) {
+            const bool address_already_31 = reads_bit31(ci);
+            if (address_already_31) {
                 // Q already reads bit 31, so it carries the very value Q31
                 // does: fold the off-slice Q31 consumers into the Q net.
                 std::vector<PortRef> users;
@@ -870,11 +924,47 @@ void XilinxPacker::constrain_srl_cascades()
                 rewired++;
                 continue;
             }
-            log_error("SRL '%s': its Q31 cascade must go through the fabric (chain deeper than 128 bits, or a "
-                      "non-SRL consumer), which needs the Q output with the read address tied to 31 -- but Q is "
-                      "already in use with another address. Restructure the shift register (srl_style/shreg "
-                      "attributes) so this segment is not tapped.\n",
-                      ci->name.c_str(ctx));
+            // B/C/D MC31 cannot leave the slice. A cell already locked there,
+            // or already a member of another cluster, still cannot reach
+            // DOUTMUX without a placer change.
+            const bool locked_above_a = ci->constr_abs_z && ((ci->constr_z >> 4) != 0);
+            if (locked_above_a) {
+                log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can do, "
+                          "but the cell is already locked above the A LUT and Q is in use.\n",
+                          ci->name.c_str(ctx));
+            }
+            // A user BEL is applied by the placer, after this pass. B/C/D
+            // MC31 cannot leave the slice, so a BEL above the A LUT used to
+            // place, then fail while routing the MC31 arc. Say so here.
+            const bool user_named_a_bel = ci->attrs.count(id_BEL) != 0;
+            if (user_named_a_bel) {
+                const std::string bel_name = ci->attrs.at(id_BEL).as_string();
+                BelId wanted = ctx->getBelByNameStr(bel_name);
+                const bool bel_name_resolves = wanted != BelId();
+                if (bel_name_resolves) {
+                    const int letter = ctx->getBelLocation(wanted).z >> 4;
+                    const bool bel_is_above_a = letter != 0;
+                    if (bel_is_above_a)
+                        log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can "
+                                  "do, but BEL '%s' is above the A LUT and Q is in use.\n",
+                                  ci->name.c_str(ctx), bel_name.c_str());
+                }
+            }
+            const bool already_at_a = ci->constr_abs_z && ((ci->constr_z >> 4) == 0);
+            const bool needs_the_a_lut = !already_at_a;
+            if (needs_the_a_lut) {
+                const bool already_in_a_cluster = ci->cluster != ClusterId() || !ci->constr_children.empty();
+                if (already_in_a_cluster) {
+                    log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can do, "
+                              "but the cell is already in another cluster and Q is in use.\n",
+                              ci->name.c_str(ctx));
+                }
+                ci->cluster = ci->name;
+                ci->constr_abs_z = true;
+                ci->constr_z = (0 << 4) | BEL_6LUT;
+            }
+            fabric++;
+            continue;
         }
         ci->disconnectPort(id_MC31);
         if (q != nullptr)
@@ -894,10 +984,14 @@ void XilinxPacker::constrain_srl_cascades()
         }
         rewired++;
     }
-    bool anything_changed = clusters || rewired;
-    if (anything_changed)
+    const bool report_cascades = clusters || rewired || fabric;
+    if (report_cascades) {
         log_info("Constrained %d SRL cascade group(s) into single slices, moved %d Q31 link(s) to Q[31]\n", clusters,
                  rewired);
+        const bool any_fabric_q31 = fabric != 0;
+        if (any_fabric_q31)
+            log_info("Locked %d SRL Q31 output(s) to the A LUT so they leave through DOUTMUX\n", fabric);
+    }
 }
 
 void XilinxPacker::pack_constants()
@@ -907,6 +1001,24 @@ void XilinxPacker::pack_constants()
         get_tied_pins(ctx, tied_pins);
     if (invertible_pins.empty())
         get_invertible_pins(ctx, invertible_pins);
+    // SRLC16E is not a constid. Naming it while the invertible list is
+    // built would intern the name on a design that has no such cell and
+    // shift every later id. The netlist has already interned the name
+    // when a cell of this type is present, so a clock tied to zero folds
+    // the same way as on SRL16E and SRLC32E. pack_srls renames
+    // IS_CLK_INVERTED to IS_WCLK_INVERTED.
+    bool seen_srlc16e = false;
+    IdString srlc16e_type;
+    for (auto &cell : ctx->cells) {
+        const bool is_srlc16e = cell.second->type.str(ctx) == "SRLC16E";
+        if (is_srlc16e) {
+            seen_srlc16e = true;
+            srlc16e_type = cell.second->type;
+        }
+    }
+    const bool any_srlc16e = seen_srlc16e;
+    if (any_srlc16e)
+        invertible_pins[srlc16e_type].insert(id_CLK);
     if (!ctx->cells.count(ctx->id("$PACKER_GND_DRV"))) {
         CellInfo *gnd_cell = ctx->createCell(ctx->id("$PACKER_GND_DRV"), id_PSEUDO_GND);
         gnd_cell->addOutput(id_Y);
@@ -1407,6 +1519,130 @@ void XC7Packer::constrain_bram_cascades()
 
 void XilinxPacker::pack_inverters()
 {
+    // An inverter folded into every clock port it drove has no loads left: it is removed, not placed with the
+    // clock routed into it
+    std::vector<IdString> dead_invs;
+    // Inverters folded into a clock port, once each, in the order of their first fold
+    std::vector<CellInfo *> folded_invs;
+    pool<IdString> seen_invs;
+    // Rewrite inverted clocks
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        for (auto &port : ci->ports) {
+            if (!port.first.in(id_WCLK, id_CLKARDCLK, id_CLKBWRCLK))
+                continue;
+            NetInfo *net = port.second.net;
+            if (!net || !net->driver.cell || net->driver.cell->type != id_INV)
+                continue;
+            CellInfo *inv = net->driver.cell;
+            bool already_inverted = bool_or_default(ci->params, ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx)), false);
+            ci->disconnectPort(port.first);
+            ci->connectPort(port.first, inv->getPort(id_I));
+            ci->params[ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx))] = Property(already_inverted ? 0 : 1);
+            const bool first_fold_of_this_inverter = seen_invs.insert(inv->name).second;
+            if (first_fold_of_this_inverter)
+                folded_invs.push_back(inv);
+            const bool inverter_has_no_loads_left = net->users.empty();
+            if (inverter_has_no_loads_left)
+                dead_invs.push_back(inv->name);
+        }
+    }
+    // A slice flip-flop and an SRL take an inverter on the clock net the same
+    // way a LUT-RAM takes one on WCLK. Yosys leaves that INV in front of C
+    // for `.C(~clk)` and in front of CLK for `.CLK(~clk)`. The port is C on
+    // FDRE/FDSE/FDCE/FDPE and CLK on SRL16E/SRLC32E/SRLC16E. A port named C
+    // on a DSP or a carry is not a clock, so the cell type gates this.
+    // SRLC16E is not a constid: its name is taken from a cell that already
+    // carries it, and is not interned on a design that has none.
+    // An FD*_1 is already a falling edge, and pack_ffs forces IS_C_INVERTED
+    // on that type, so an inverter on its clock becomes the plain primitive
+    // with the combined polarity. pack_srls renames IS_CLK_INVERTED to
+    // IS_WCLK_INVERTED afterwards, so the parameter written here is
+    // IS_CLK_INVERTED.
+    int folded_clocks = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool ff_fdre = ci->type == id_FDRE || ci->type == id_FDRE_1;
+        const bool ff_fdse = ci->type == id_FDSE || ci->type == id_FDSE_1;
+        const bool ff_fdce = ci->type == id_FDCE || ci->type == id_FDCE_1;
+        const bool ff_fdpe = ci->type == id_FDPE || ci->type == id_FDPE_1;
+        const bool slice_ff = ff_fdre || ff_fdse || ff_fdce || ff_fdpe;
+        const bool srl_known = ci->type == id_SRL16E || ci->type == id_SRLC32E;
+        const bool srlc16e = !slice_ff && !srl_known && ci->type.str(ctx) == "SRLC16E";
+        const bool srl = srl_known || srlc16e;
+        const bool foldable_clock = slice_ff || srl;
+        if (!foldable_clock)
+            continue;
+        const IdString port = slice_ff ? id_C : id_CLK;
+        const IdString param = slice_ff ? id_IS_C_INVERTED : id_IS_CLK_INVERTED;
+        NetInfo *net = ci->getPort(port);
+        const bool driven_by_inv = net != nullptr && net->driver.cell != nullptr && net->driver.cell->type == id_INV;
+        if (!driven_by_inv)
+            continue;
+        CellInfo *inv = net->driver.cell;
+        NetInfo *src = inv->getPort(id_I);
+        const bool source_net_exists = src != nullptr;
+        if (!source_net_exists)
+            continue;
+        const bool falling_variant =
+                ci->type == id_FDRE_1 || ci->type == id_FDSE_1 || ci->type == id_FDCE_1 || ci->type == id_FDPE_1;
+        const bool param_inverted = int_or_default(ci->params, param, 0) == 1;
+        // The _1 type already means inverted; pack_ffs replaces any parameter
+        // on it with IS_C_INVERTED=1. Count that once, then the inverter.
+        const bool inverted_before = falling_variant || param_inverted;
+        const bool now_inverted = !inverted_before;
+        const bool from_fdre_1 = ci->type == id_FDRE_1;
+        if (from_fdre_1)
+            ci->type = id_FDRE;
+        const bool from_fdse_1 = ci->type == id_FDSE_1;
+        if (from_fdse_1)
+            ci->type = id_FDSE;
+        const bool from_fdce_1 = ci->type == id_FDCE_1;
+        if (from_fdce_1)
+            ci->type = id_FDCE;
+        const bool from_fdpe_1 = ci->type == id_FDPE_1;
+        if (from_fdpe_1)
+            ci->type = id_FDPE;
+        ci->disconnectPort(port);
+        ci->connectPort(port, src);
+        ci->params[param] = Property(now_inverted ? 1 : 0);
+        ++folded_clocks;
+        const bool first_fold_of_this_inverter = seen_invs.insert(inv->name).second;
+        if (first_fold_of_this_inverter)
+            folded_invs.push_back(inv);
+        const bool inverter_has_no_loads_left = net->users.empty();
+        if (inverter_has_no_loads_left)
+            dead_invs.push_back(inv->name);
+    }
+    const bool any_folded_clock = folded_clocks > 0;
+    if (any_folded_clock)
+        log_info("    folded %d slice FF or SRL clock port(s)\n", folded_clocks);
+    // The folded cells now use the source net. A clock constraint that named
+    // only the inverted net would stay behind, and they would be timed at the
+    // default period. Give it to the source net and exchange the high and low
+    // intervals: the source is the other edge of the same waveform. An
+    // inverted net that still has loads keeps its own constraint, so the
+    // source gets a copy. If the source already has one, leave both.
+    for (CellInfo *inv : folded_invs) {
+        NetInfo *net = inv->getPort(id_O);
+        NetInfo *src = inv->getPort(id_I);
+        const bool source_takes_the_constraint =
+                src != nullptr && src != net && net->clkconstr != nullptr && src->clkconstr == nullptr;
+        if (source_takes_the_constraint) {
+            const bool inverted_net_keeps_loads = !net->users.empty();
+            if (inverted_net_keeps_loads)
+                src->clkconstr = std::make_unique<ClockConstraint>(*net->clkconstr);
+            else
+                src->clkconstr = std::move(net->clkconstr);
+            std::swap(src->clkconstr->high, src->clkconstr->low);
+            continue;
+        }
+        const bool both_clocks_already_constrained =
+                src != nullptr && net->clkconstr != nullptr && src->clkconstr != nullptr;
+        if (both_clocks_already_constrained)
+            log_info("    clock constraint on net '%s' kept; net '%s' already has one\n", ctx->nameOf(net),
+                     ctx->nameOf(src));
+    }
     // Fold an inverter driving a PLL/MMCM control pin into that pin's
     // IS_<pin>_INVERTED parameter, which is what Vivado does.
     //
@@ -1424,7 +1660,6 @@ void XilinxPacker::pack_inverters()
     // generic invertible_pins list includes bussed pins like OPMODE[0], whose
     // parameter is a vector rather than IS_<pin>_INVERTED, and folding those
     // needs bit-level handling this does not attempt.
-    std::vector<IdString> dead_invs;
     int folded = 0;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();

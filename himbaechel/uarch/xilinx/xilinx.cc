@@ -1334,6 +1334,152 @@ void XilinxImpl::apply_prerouted()
              bound_nets, pruned, missing, collided);
 }
 
+// The top-level port a clock net comes from, through clock buffers and IOB
+// input buffers (the way a clock constraint propagates from a pad), or
+// IdString() if there is none or a buffer has more than one clock input.
+// A BUFR is followed from O back to I only when BUFR_DIVIDE is BYPASS or
+// the parameter is absent: a divider is a different clock and keeps its
+// net's name. BUFR_DIVIDE is not a constid, so the name is matched as a
+// string, the way the BUFGMUX types are, and no id is created.
+IdString XilinxImpl::clock_source_port(const NetInfo *net) const
+{
+    static const dict<IdString, std::vector<IdString>> clock_inputs = {
+            {id_BUFGCTRL, {id_I0, id_I1}}, {id_BUFHCE_BUFHCE, {id_I}},       {id_BUFIO_BUFIO, {id_I}},
+            {id_BUFMRCE, {id_I}},          {id_IOB33M_INBUF_EN, {id_PAD}},   {id_IOB33S_INBUF_EN, {id_PAD}},
+            {id_IOB33_INBUF_EN, {id_PAD}}, {id_IOB18_INBUF_DCIEN, {id_PAD}}, {id_IOB18M_INBUF_DCIEN, {id_PAD}}};
+    for (int hop = 0; hop < 8; hop++) {
+        for (auto &user : net->users) {
+            const bool user_is_pad = user.cell->type == id_PAD;
+            if (user_is_pad)
+                return user.cell->name;
+        }
+        const CellInfo *buf = net->driver.cell;
+        const bool is_undivided_bufr = buf != nullptr && buf->type == id_BUFR_BUFR && net->driver.port == id_O;
+        if (is_undivided_bufr) {
+            std::string divide = "BYPASS";
+            for (const auto &param : buf->params) {
+                const bool is_divide_param = param.first.str(ctx) == "BUFR_DIVIDE";
+                if (is_divide_param) {
+                    const bool value_is_string = param.second.is_string;
+                    if (value_is_string)
+                        divide = param.second.str;
+                    break;
+                }
+            }
+            const bool passes_the_clock = divide == "BYPASS";
+            if (!passes_the_clock)
+                return IdString();
+            const NetInfo *clock_in = buf->getPort(id_I);
+            const bool carries_a_signal = clock_in != nullptr && clock_in->constant_value == IdString();
+            if (!carries_a_signal)
+                return IdString();
+            net = clock_in;
+            continue;
+        }
+        auto inputs = buf == nullptr ? clock_inputs.end() : clock_inputs.find(buf->type);
+        const bool is_a_buffer = inputs != clock_inputs.end();
+        if (!is_a_buffer)
+            return IdString();
+        const NetInfo *clock_in = nullptr;
+        int count = 0;
+        for (IdString port : inputs->second) {
+            const NetInfo *in = buf->getPort(port);
+            const bool carries_a_signal = in != nullptr && in->constant_value == IdString();
+            if (carries_a_signal) {
+                clock_in = in;
+                count++;
+            }
+        }
+        const bool one_clock_input = count == 1;
+        if (!one_clock_input)
+            return IdString();
+        net = clock_in;
+    }
+    return IdString();
+}
+
+// --report keys each clock by its net. Since YosysHQ/yosys#6103 synth_xilinx
+// maps with abc9, and the net behind a clock buffer comes out of it with an
+// internal name like $abc$20890$aiger$o102. Key such a clock by the port it
+// comes from instead, in the timing results only: placement, routing and the
+// netlist stay as they are, and the port's name is already an id.
+void XilinxImpl::name_clocks_after_ports()
+{
+    TimingResult &result = ctx->timing_result;
+    pool<IdString> clocks;
+    auto add_pair = [&](const ClockPair &pair) {
+        clocks.insert(pair.start.clock);
+        clocks.insert(pair.end.clock);
+    };
+    for (auto &clock : result.clock_fmax)
+        clocks.insert(clock.first);
+    for (auto &path : result.clock_paths)
+        add_pair(path.second.clock_pair);
+    for (auto &path : result.xclock_paths)
+        add_pair(path.clock_pair);
+    for (auto clock : result.empty_paths)
+        clocks.insert(clock);
+
+    dict<IdString, IdString> port_of;
+    dict<IdString, int> clocks_at_port;
+    for (auto clock : clocks) {
+        auto net = ctx->nets.find(clock);
+        const bool is_internal_net = clock.c_str(ctx)[0] == '$' && net != ctx->nets.end();
+        if (!is_internal_net)
+            continue;
+        const IdString port = clock_source_port(net->second.get());
+        const bool comes_from_a_port = port != IdString();
+        if (!comes_from_a_port)
+            continue;
+        port_of[clock] = port;
+        clocks_at_port[port]++;
+    }
+    dict<IdString, IdString> rename;
+    for (auto &entry : port_of) {
+        const bool name_is_free = clocks_at_port.at(entry.second) == 1 && !clocks.count(entry.second);
+        if (name_is_free)
+            rename[entry.first] = entry.second;
+    }
+    const bool nothing_to_rename = rename.empty();
+    if (nothing_to_rename)
+        return;
+
+    auto renamed = [&](IdString clock) {
+        auto found = rename.find(clock);
+        return found == rename.end() ? clock : found->second;
+    };
+    auto rename_pair = [&](ClockPair &pair) {
+        pair.start.clock = renamed(pair.start.clock);
+        pair.end.clock = renamed(pair.end.clock);
+    };
+    // A dict iterates from its last entry: rebuild these two in their order,
+    // which is the order of the report's critical paths.
+    std::vector<std::pair<IdString, ClockFmax>> fmax(result.clock_fmax.begin(), result.clock_fmax.end());
+    result.clock_fmax.clear();
+    for (auto it = fmax.rbegin(); it != fmax.rend(); ++it)
+        result.clock_fmax[renamed(it->first)] = it->second;
+    std::vector<std::pair<IdString, CriticalPath>> paths(result.clock_paths.begin(), result.clock_paths.end());
+    result.clock_paths.clear();
+    for (auto it = paths.rbegin(); it != paths.rend(); ++it) {
+        rename_pair(it->second.clock_pair);
+        result.clock_paths[renamed(it->first)] = std::move(it->second);
+    }
+    for (auto &path : result.xclock_paths)
+        rename_pair(path.clock_pair);
+    for (auto &path : result.min_delay_violations)
+        rename_pair(path.clock_pair);
+    for (auto &net : result.detailed_net_timings)
+        for (auto &sink : net.second)
+            rename_pair(sink.clock_pair);
+    std::vector<IdString> empty_paths(result.empty_paths.begin(), result.empty_paths.end());
+    result.empty_paths.clear();
+    for (auto it = empty_paths.rbegin(); it != empty_paths.rend(); ++it)
+        result.empty_paths.insert(renamed(*it));
+    for (auto &entry : rename)
+        log_info("Clock '%s' is reported as '%s', the port it comes from.\n", entry.first.c_str(ctx),
+                 entry.second.c_str(ctx));
+}
+
 void XilinxImpl::postRoute()
 {
     pr_window_report();
@@ -1341,6 +1487,8 @@ void XilinxImpl::postRoute()
     // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
     fixup_routing();
+    // After the last timing analysis (hold-fix runs one).
+    name_clocks_after_ports();
     ctx->assignArchInfo();
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
@@ -1497,6 +1645,64 @@ const char *bram_write_mode_code(const CellInfo *ci, IdString param)
 }
 } // namespace
 
+bool XilinxImpl::cell_param_is_one(const CellInfo *cell, const char *name) const
+{
+    for (const auto &param : cell->params) {
+        const bool same_name = param.first.str(ctx) == name;
+        if (same_name)
+            return int_or_default(cell->params, param.first, 0) == 1;
+    }
+    return false;
+}
+
+bool XilinxImpl::bram_clock_on_falling_edge(const CellInfo *cell, IdString clock_port) const
+{
+    const std::string clock_name = clock_port.str(ctx);
+    const bool port_a = clock_name.compare(0, 9, "CLKARDCLK") == 0;
+    if (port_a)
+        return cell_param_is_one(cell, "IS_CLKARDCLK_INVERTED");
+    const bool port_b = clock_name.compare(0, 9, "CLKBWRCLK") == 0;
+    if (port_b)
+        return cell_param_is_one(cell, "IS_CLKBWRCLK_INVERTED");
+    return false;
+}
+
+bool XilinxImpl::clock_on_falling_edge(const CellInfo *cell, IdString clock_port) const
+{
+    const bool is_ff = cell->type == id_SLICE_FFX;
+    if (is_ff) {
+        const bool clock_is_ck = clock_port == id_CK;
+        if (clock_is_ck)
+            return int_or_default(cell->params, id_IS_C_INVERTED, 0) == 1;
+        return false;
+    }
+    const bool is_lut = cell->type == id_SLICE_LUTX;
+    if (is_lut) {
+        const bool clock_is_clk = clock_port == id_CLK;
+        if (clock_is_clk)
+            return int_or_default(cell->params, id_IS_WCLK_INVERTED, 0) == 1;
+        return false;
+    }
+    const bool is_bram = cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1;
+    if (is_bram)
+        return bram_clock_on_falling_edge(cell, clock_port);
+    return false;
+}
+
+TimingClockingInfo XilinxImpl::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
+{
+    TimingClockingInfo info = ctx->get_port_clocking_info_default(cell, port, index);
+    const bool falling = clock_on_falling_edge(cell, info.clock_port);
+    if (falling) {
+        // Only the rising arcs stored in the chipdb are flipped. An arc that
+        // the chipdb already marks falling is left alone.
+        const bool chipdb_says_rising = info.edge == RISING_EDGE;
+        if (chipdb_says_rising)
+            info.edge = FALLING_EDGE;
+    }
+    return info;
+}
+
 void XilinxImpl::assign_cell_tags()
 {
     cell_tags.resize(ctx->cells.size());
@@ -1526,6 +1732,15 @@ void XilinxImpl::assign_cell_tags()
             ct.lut.memory_group = 0; // fixme
             ct.lut.is_srl = ci->attrs.count(id_X_LUT_AS_SRL);
             ct.lut.is_memory = ci->attrs.count(id_X_LUT_AS_DRAM);
+            // A LUT-RAM or SRL output also changes on the clock: those cells take the
+            // timing the chipdb keeps under their attribute, with clock-to-out arcs.
+            const bool lut_is_clocked = ct.lut.is_srl || ct.lut.is_memory;
+            if (lut_is_clocked) {
+                const int mem_timing = ctx->get_cell_timing_idx(ct.lut.is_srl ? id_X_LUT_AS_SRL : id_X_LUT_AS_DRAM);
+                const bool chipdb_has_mem_timing = mem_timing != -1;
+                if (chipdb_has_mem_timing)
+                    ci->timing_index = mem_timing;
+            }
             ct.lut.only_drives_carry = false;
             if (ci->cluster != ClusterId() && ct.lut.output_count > 0 && ct.lut.output_sigs[0] != nullptr &&
                 ct.lut.output_sigs[0]->users.entries() == 1 &&

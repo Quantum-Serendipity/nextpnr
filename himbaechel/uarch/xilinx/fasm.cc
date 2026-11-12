@@ -581,6 +581,9 @@ struct FasmBackend
     std::vector<IdString> get_inputs(CellInfo *cell)
     {
         IdString type = ctx->id(str_or_default(cell->attrs, id_X_ORIG_TYPE, ""));
+        const bool is_srl16_inputs = type == id_SRL16E || type.str(ctx) == "SRLC16E";
+        if (is_srl16_inputs)
+            return {id_A0, id_A1, id_A2, id_A3};
         if (type == id_LUT1)
             return {id_I0};
         else if (type == id_LUT2)
@@ -595,8 +598,6 @@ struct FasmBackend
             return {id_I0, id_I1, id_I2, id_I3, id_I4, id_I5};
         else if (type == id_RAMD64E)
             return {id_RADR0, id_RADR1, id_RADR2, id_RADR3, id_RADR4, id_RADR5};
-        else if (type == id_SRL16E)
-            return {id_A0, id_A1, id_A2, id_A3};
         else if (type == id_SRLC32E)
             return {ctx->id("A[0]"), ctx->id("A[1]"), ctx->id("A[2]"), ctx->id("A[3]"), ctx->id("A[4]")};
         else if (type == id_RAMD32)
@@ -642,17 +643,17 @@ struct FasmBackend
             // has no logical LUT inputs to map through X_ORIG_PORT_A1..A6, so
             // the phys_to_log walk below would leave every bit equal to
             // init.str.at(0).  Each SRL INIT bit k is stored in the LUT INIT at
-            // both bit 2k and 2k+1 (nextpnr-xilinx#181).  For SRL16E
-            // specifically, pack_srls() ties A6 (LUT address bit 5) to VCC when
+            // both bit 2k and 2k+1 (nextpnr-xilinx#181).  For SRL16E and SRLC16E,
+            // pack_srls() ties A6 (LUT address bit 5) to VCC when
             // the cell sits in the 6LUT position (i==0), so only addresses
             // [32:64) are ever read -- the fracturable narrowing above selects
             // that half only when lut5 AND lut6 are BOTH non-null, an unrelated
             // condition, so override it by position.  SRLC32E ties only A1 and
             // uses the full 64-bit space regardless of position.
             std::string orig_type = str_or_default(lut->attrs, id_X_ORIG_TYPE, "");
-            bool lut_is_srl = (orig_type == "SRL16E") || (orig_type == "SRLC32E");
+            const bool lut_is_srl = (orig_type == "SRL16E") || (orig_type == "SRLC16E") || (orig_type == "SRLC32E");
             if (lut_is_srl) {
-                bool is_srl16e = orig_type == "SRL16E";
+                const bool is_srl16e = orig_type == "SRL16E" || orig_type == "SRLC16E";
                 if (is_srl16e) {
                     lbound = (i == 1) ? 0 : 32;
                     ubound = (i == 1) ? 32 : 64;
@@ -711,6 +712,13 @@ struct FasmBackend
                 // Ignore modes with no associated bit (X-ray omission??)
                 if (belname == "WEMUX" && pinname == "WE")
                     continue;
+                // The all-zero state of DOUTMUX is the MC31 leg. A bitstream
+                // that drives DMUX from an A6LUT MC31 carries no DOUTMUX
+                // feature, and the database row for that leg also sets the
+                // bit shared with A5FFMUX.IN_B.
+                const bool doutmux_mc31_is_the_default = belname == "DOUTMUX" && pinname == "MC31";
+                if (doutmux_mc31_is_the_default)
+                    continue;
 
                 if (belname.substr(1) == "DI1MUX") {
                     // prjxray names the non-default leg of these muxes after
@@ -761,7 +769,6 @@ struct FasmBackend
     void write_ffs_config(int tile, int half)
     {
         bool found_ff = false;
-        bool negedge_ff = false;
         bool is_latch = false;
         bool is_sync = false;
         bool is_clkinv = false;
@@ -814,42 +821,42 @@ struct FasmBackend
                 zinit = (init_val != 1);
                 if (type == "FDRE") {
                     zrst = true;
-                    SET_CHECK(negedge_ff, false);
+                    SET_CHECK(is_clkinv, int_or_default(ff->params, id_IS_C_INVERTED) == 1);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, true);
                 } else if (type == "FDRE_1") {
                     zrst = true;
-                    SET_CHECK(negedge_ff, true);
+                    SET_CHECK(is_clkinv, true);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, true);
                 } else if (type == "FDSE") {
                     zrst = false;
-                    SET_CHECK(negedge_ff, false);
+                    SET_CHECK(is_clkinv, int_or_default(ff->params, id_IS_C_INVERTED) == 1);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, true);
                 } else if (type == "FDSE_1") {
                     zrst = false;
-                    SET_CHECK(negedge_ff, true);
+                    SET_CHECK(is_clkinv, true);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, true);
                 } else if (type == "FDCE") {
                     zrst = true;
-                    SET_CHECK(negedge_ff, false);
+                    SET_CHECK(is_clkinv, int_or_default(ff->params, id_IS_C_INVERTED) == 1);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, false);
                 } else if (type == "FDCE_1") {
                     zrst = true;
-                    SET_CHECK(negedge_ff, true);
+                    SET_CHECK(is_clkinv, true);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, false);
                 } else if (type == "FDPE") {
                     zrst = false;
-                    SET_CHECK(negedge_ff, false);
+                    SET_CHECK(is_clkinv, int_or_default(ff->params, id_IS_C_INVERTED) == 1);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, false);
                 } else if (type == "FDPE_1") {
                     zrst = false;
-                    SET_CHECK(negedge_ff, true);
+                    SET_CHECK(is_clkinv, true);
                     SET_CHECK(is_latch, false);
                     SET_CHECK(is_sync, false);
                 } else {
@@ -860,10 +867,7 @@ struct FasmBackend
                 write_bit("ZRST", zrst);
 
                 pop();
-                if (negedge_ff)
-                    SET_CHECK(is_clkinv, true);
-                else
-                    SET_CHECK(is_clkinv, int_or_default(ff->params, id_IS_C_INVERTED) == 1);
+
 
                 NetInfo *sr = ff->getPort(id_SR), *ce = ff->getPort(id_CE);
 
@@ -997,15 +1001,22 @@ struct FasmBackend
                         if (lut == nullptr)
                             continue;
                         std::string type = str_or_default(lut->attrs, id_X_ORIG_TYPE);
-                        if (type == "RAMD64E" || type == "RAMS64E") {
+                        const bool is_wide_ram = type == "RAMD64E" || type == "RAMS64E";
+                        if (is_wide_ram) {
                             is_ram = true;
-                        } else if (type == "RAMD32" || type == "RAMS32") {
+                        }
+                        const bool is_small_ram = type == "RAMD32" || type == "RAMS32";
+                        if (is_small_ram) {
                             is_ram = true;
                             is_small = true;
-                        } else if (type == "SRL16E") {
+                        }
+                        const bool is_srl16 = type == "SRL16E" || type == "SRLC16E";
+                        if (is_srl16) {
                             is_srl = true;
                             is_small = true;
-                        } else if (type == "SRLC32E") {
+                        }
+                        const bool is_srl32 = type == "SRLC32E";
+                        if (is_srl32) {
                             is_srl = true;
                         }
                         wa7_used |= (lut->getPort(id_WA7) != nullptr);

@@ -254,11 +254,48 @@ void XilinxImpl::replicate_merged_ffs()
     ctx->assignArchInfo();
     assign_cell_tags();
 
+    // A copy reads the original's input nets, so each of their drivers gains
+    // a user.  A driver inside a slice may have fed only its own position's
+    // flip-flop -- a LUT's O5, a carry's O, an F7/F8 mux output -- and now
+    // has to leave through the position's single output mux, which can
+    // already be taken (an O5 on its way to the fabric; the OUTMUX budget in
+    // xc7_logic_tile_valid).  The tile's legality cache refreshes on bel
+    // changes, not net changes, so mark the driver's tile dirty and ask.
+    // (vc707-cdc6000: a BFF reading its slice's F8MUX was split towards far
+    // sinks while the B5LUT's O5 held BMUX, and the F8MUX had no way out:
+    // "Failed to route arc ... F8MUX_OUT to ... B5FFMUX_OUT".)
+    auto driver_tiles_dirty = [&](const CellInfo *copy) {
+        std::vector<BelId> drivers;
+        for (auto &port : copy->ports) {
+            if (port.second.type == PORT_OUT || port.second.net == nullptr)
+                continue;
+            const CellInfo *drv = port.second.net->driver.cell;
+            if (drv == nullptr || drv->bel == BelId())
+                continue;
+            auto &lts = tile_status.at(drv->bel.tile).lts;
+            if (!lts)
+                continue;
+            for (auto &eight : lts->eights)
+                eight.dirty = true;
+            for (auto &half : lts->halfs)
+                half.dirty = true;
+            drivers.push_back(drv->bel);
+        }
+        return drivers;
+    };
+    auto drivers_stay_legal = [&](const CellInfo *copy) {
+        for (BelId bel : driver_tiles_dirty(copy))
+            if (!isBelLocationValid(bel))
+                return false;
+        return true;
+    };
+
     int placed = 0, undone = 0;
     for (auto &cp : copies) {
         const Region *region = cp.cell->region;
         BelId found;
-        for (int r = 0; r <= search_radius && found == BelId(); r++) {
+        const bool drivers_can_reach_it = drivers_stay_legal(cp.cell);
+        for (int r = 0; r <= search_radius && found == BelId() && drivers_can_reach_it; r++) {
             for (int dx = -r; dx <= r && found == BelId(); dx++) {
                 for (int dy = -r; dy <= r && found == BelId(); dy++) {
                     if (std::max(std::abs(dx), std::abs(dy)) != r)
@@ -282,16 +319,23 @@ void XilinxImpl::replicate_merged_ffs()
             }
         }
         if (found == BelId()) {
-            // No site near the cluster: this copy was not worth having.  Its
-            // sinks go back to the original, whose placement is still legal,
-            // and the copy and its net disappear.
-            log_warning("replicate: no free flip-flop site within %d tiles of (%d,%d) for '%s'; keeping the "
-                        "original\n",
-                        search_radius, cp.centre.x, cp.centre.y, ctx->nameOf(cp.cell));
+            // No site near the cluster, or a driver that cannot reach one: this
+            // copy was not worth having.  Its sinks go back to the original,
+            // whose placement is still legal, and the copy and its net
+            // disappear.
+            if (drivers_can_reach_it)
+                log_warning("replicate: no free flip-flop site within %d tiles of (%d,%d) for '%s'; keeping the "
+                            "original\n",
+                            search_radius, cp.centre.x, cp.centre.y, ctx->nameOf(cp.cell));
+            else
+                log_warning("replicate: a driver of '%s' has no free output mux to reach a copy; keeping the "
+                            "original\n",
+                            ctx->nameOf(cp.cell));
             for (auto &sink : cp.taken_sinks) {
                 sink.cell->disconnectPort(sink.port);
                 sink.cell->connectPort(sink.port, cp.original_q);
             }
+            driver_tiles_dirty(cp.cell); // the drivers' legality is cached with the copy among their users
             IdString copy_name = cp.cell->name;
             NetInfo *nq = cp.cell->getPort(id_Q);
             for (auto &port : cp.cell->ports)
@@ -306,7 +350,7 @@ void XilinxImpl::replicate_merged_ffs()
     }
     log_info("replicate: %d of %zu flip-flops (%zu merged by the synthesis) split into %d copies%s, wirelength down "
              "by %lld\n",
-             split, merged.size(), flagged, placed, undone ? stringf(" (%d undone, no site)", undone).c_str() : "",
+             split, merged.size(), flagged, placed, undone ? stringf(" (%d undone)", undone).c_str() : "",
              (long long)saved);
 }
 

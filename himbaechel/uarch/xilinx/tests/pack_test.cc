@@ -1093,3 +1093,76 @@ TEST_F(XilinxRouteThruTest, spread_flip_flop_is_split_towards_its_far_sinks)
     EXPECT_EQ(near_on_orig, 4);
     EXPECT_TRUE(ctx->isBelLocationValid(copy->bel));
 }
+
+TEST_F(XilinxRouteThruTest, a_split_whose_driver_cannot_reach_the_copy_is_undone)
+{
+    // vc707-cdc6000 on the demos gate: the flip-flop at BFF read its slice's
+    // F8MUX, which reached it inside the position, while the B5LUT's O5 left
+    // the position through BMUX, the one selectable output.  The copy placed
+    // by the far sinks read the F8MUX from outside, so the F8MUX needed BMUX
+    // too, and the router had no way out ("Failed to route arc ... F8MUX_OUT
+    // to ... B5FFMUX_OUT").  The copy's own site was checked; the driver's
+    // position was not.
+    setup_nets();
+    NetInfo *f8 = ctx->createNet(ctx->id("f8"));
+    CellInfo *mux = ctx->createCell(ctx->id("mux"), id_SELMUX2_1);
+    mux->addInput(id_S0);
+    mux->addOutput(id_OUT);
+    mux->connectPort(id_S0, fabric_net(ctx, "sel"));
+    mux->connectPort(id_OUT, f8);
+    CellInfo *ff = packed_ff("ff", f8);
+    ff->attrs[id_MERGED_EQUIV] = Property("ffb;ffc");
+    NetInfo *q = ff->getPort(id_Q);
+    // the position's 5LUT, whose output goes to the fabric
+    CellInfo *lut5 = packed_lut("lut5");
+    CellInfo *reader = packed_lut("reader");
+    reader->disconnectPort(id_A1);
+    reader->connectPort(id_A1, lut5->getPort(id_O6));
+    // eight LUT sinks on the flip-flop: four beside it, four far away
+    BelId home = logic_bel("SLICE_X0Y0.BFF");
+    ASSERT_NE(home, BelId());
+    Loc hl = ctx->getBelLocation(home);
+    std::vector<CellInfo *> sinks;
+    for (int i = 0; i < 8; i++) {
+        CellInfo *lut = ctx->createCell(ctx->idf("sink%d", i), id_SLICE_LUTX);
+        lut->addInput(id_A1);
+        lut->addOutput(id_O6);
+        lut->connectPort(id_A1, q);
+        lut->connectPort(id_O6, ctx->createNet(ctx->idf("sink%d_o", i)));
+        sinks.push_back(lut);
+    }
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true;
+    ctx->bindBel(home, ff, STRENGTH_WEAK);
+    ctx->bindBel(logic_bel("SLICE_X0Y0.F8MUX"), mux, STRENGTH_WEAK);
+    ctx->bindBel(logic_bel("SLICE_X0Y0.B5LUT"), lut5, STRENGTH_WEAK);
+    auto lut_bel_near = [&](int x, int y) {
+        for (int dy = 0; dy < 40; dy++)
+            for (int dx = 0; dx < 40; dx++) {
+                for (BelId bel : ctx->getBelsByTile(x + dx, y + dy)) {
+                    if (ctx->getBelType(bel) == id_SLICE_LUTX && ctx->checkBelAvail(bel) && xil->is_logic_tile(bel))
+                        return bel;
+                }
+            }
+        return BelId();
+    };
+    const int far_x = std::min(hl.x + 120, ctx->getGridDimX() - 45);
+    ASSERT_GT(far_x, hl.x + 40);
+    for (int i = 0; i < 8; i++) {
+        BelId b = lut_bel_near(i < 4 ? hl.x + 2 : far_x, hl.y + 2 * i);
+        ASSERT_NE(b, BelId()) << i;
+        ctx->bindBel(b, sinks[i], STRENGTH_WEAK);
+    }
+    // legal as placed: the F8MUX output stays in its position, O5 has BMUX
+    ASSERT_TRUE(ctx->isBelLocationValid(home));
+
+    xil->replicate_merged_ffs();
+
+    // the split was worth it by wirelength and is undone all the same
+    EXPECT_EQ(ctx->cells.count(ctx->id("ff$dup1")), size_t(0));
+    EXPECT_EQ(f8->users.entries(), size_t(1));
+    for (int i = 0; i < 8; i++)
+        EXPECT_EQ(sinks[i]->getPort(id_A1), q) << i;
+    EXPECT_TRUE(ctx->isBelLocationValid(home));
+}

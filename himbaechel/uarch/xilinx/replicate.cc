@@ -47,7 +47,8 @@ struct Pt
 // HeAP's weighting for this arch: a horizontal tile step counts double
 int64_t hpwl(const std::vector<Pt> &pts)
 {
-    if (pts.empty())
+    const bool no_points = pts.empty();
+    if (no_points)
         return 0;
     int x0 = pts[0].x, x1 = pts[0].x, y0 = pts[0].y, y1 = pts[0].y;
     for (auto &p : pts) {
@@ -71,7 +72,8 @@ std::vector<int> kmeans(const std::vector<Pt> &pts, int k, std::vector<Pt> &cent
             int64_t d = std::numeric_limits<int64_t>::max();
             for (auto &c : centres)
                 d = std::min<int64_t>(d, 2 * std::abs(p.x - c.x) + std::abs(p.y - c.y));
-            if (d > best) {
+            const bool farther_than_best = d > best;
+            if (farther_than_best) {
                 best = d;
                 bp = p;
             }
@@ -86,12 +88,14 @@ std::vector<int> kmeans(const std::vector<Pt> &pts, int k, std::vector<Pt> &cent
             int64_t bd = std::numeric_limits<int64_t>::max();
             for (int c = 0; c < k; c++) {
                 int64_t d = 2 * std::abs(pts[i].x - centres[c].x) + std::abs(pts[i].y - centres[c].y);
-                if (d < bd) {
+                const bool closer_than_best = d < bd;
+                if (closer_than_best) {
                     bd = d;
                     bc = c;
                 }
             }
-            if (assign[i] != bc) {
+            const bool moved_cluster = assign[i] != bc;
+            if (moved_cluster) {
                 assign[i] = bc;
                 changed = true;
             }
@@ -102,10 +106,13 @@ std::vector<int> kmeans(const std::vector<Pt> &pts, int k, std::vector<Pt> &cent
             sy[assign[i]] += pts[i].y;
             n[assign[i]]++;
         }
-        for (int c = 0; c < k; c++)
-            if (n[c] > 0)
+        for (int c = 0; c < k; c++) {
+            const bool has_members = n[c] > 0;
+            if (has_members)
                 centres[c] = Pt{int(sx[c] / n[c]), int(sy[c] / n[c])};
-        if (!changed)
+        }
+        const bool converged = !changed;
+        if (converged)
             break;
     }
     return assign;
@@ -115,8 +122,9 @@ std::vector<int> kmeans(const std::vector<Pt> &pts, int k, std::vector<Pt> &cent
 
 void XilinxImpl::replicate_merged_ffs()
 {
-    if (ctx->args.options.count("replicate") &&
-        ctx->args.options.at("replicate").as<std::string>() == "off")
+    const bool replication_off = ctx->args.options.count("replicate") &&
+                                 ctx->args.options.at("replicate").as<std::string>() == "off";
+    if (replication_off)
         return;
     const int copy_cost = 24;          // HPWL a copy has to save to be worth a flip-flop and a net
     const size_t min_sinks = 4;
@@ -129,15 +137,19 @@ void XilinxImpl::replicate_merged_ffs()
     size_t flagged = 0;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        if (ci->type != id_SLICE_FFX || ci->bel == BelId())
+        const bool not_a_placed_ff = ci->type != id_SLICE_FFX || ci->bel == BelId();
+        if (not_a_placed_ff)
             continue;
-        if (ci->belStrength > STRENGTH_STRONG || ci->cluster != ClusterId())
+        const bool fixed_or_clustered = ci->belStrength > STRENGTH_STRONG || ci->cluster != ClusterId();
+        if (fixed_or_clustered)
             continue;
-        if (ci->attrs.count(id_MERGED_EQUIV))
+        const bool merged_by_synthesis = ci->attrs.count(id_MERGED_EQUIV);
+        if (merged_by_synthesis)
             flagged++;
         merged.push_back(ci);
     }
-    if (merged.empty())
+    const bool no_candidates = merged.empty();
+    if (no_candidates)
         return;
     std::sort(merged.begin(), merged.end(), [](CellInfo *a, CellInfo *b) { return a->name < b->name; });
 
@@ -153,23 +165,27 @@ void XilinxImpl::replicate_merged_ffs()
     int split = 0;
     for (CellInfo *ci : merged) {
         NetInfo *q = ci->getPort(id_Q);
-        if (q == nullptr)
+        const bool no_q_net = q == nullptr;
+        if (no_q_net)
             continue;
         int absorbed = 2;
-        if (ci->attrs.count(id_MERGED_EQUIV)) {
+        const bool was_merged = ci->attrs.count(id_MERGED_EQUIV);
+        if (was_merged) {
             const std::string names = ci->attrs.at(id_MERGED_EQUIV).as_string();
             absorbed = int(std::count(names.begin(), names.end(), ';')) + 1;
         }
         std::vector<PortRef> sinks;
         std::vector<Pt> pts;
         for (auto &usr : q->users) {
-            if (usr.cell == nullptr || usr.cell->bel == BelId())
+            const bool unplaced_sink = usr.cell == nullptr || usr.cell->bel == BelId();
+            if (unplaced_sink)
                 continue;
             Loc l = ctx->getBelLocation(usr.cell->bel);
             sinks.push_back(usr);
             pts.push_back(Pt{l.x, l.y});
         }
-        if (sinks.size() < min_sinks)
+        const bool too_few_sinks = sinks.size() < min_sinks;
+        if (too_few_sinks)
             continue;
         Loc here = ctx->getBelLocation(ci->bel);
         std::vector<Pt> all = pts;
@@ -189,22 +205,27 @@ void XilinxImpl::replicate_merged_ffs()
             int64_t cost = int64_t(k - 1) * copy_cost;
             for (int c = 0; c < k; c++) {
                 std::vector<Pt> members;
-                for (size_t i = 0; i < pts.size(); i++)
-                    if (assign[i] == c)
+                for (size_t i = 0; i < pts.size(); i++) {
+                    const bool in_this_cluster = assign[i] == c;
+                    if (in_this_cluster)
                         members.push_back(pts[i]);
-                if (members.empty())
+                }
+                const bool empty_cluster = members.empty();
+                if (empty_cluster)
                     continue;
                 members.push_back(centres[c]); // the copy sits by its cluster
                 cost += hpwl(members);
             }
-            if (cost < best_cost) {
+            const bool cheaper_than_best = cost < best_cost;
+            if (cheaper_than_best) {
                 best_cost = cost;
                 best_k = k;
                 best_assign = assign;
                 best_centres = centres;
             }
         }
-        if (best_k == 1)
+        const bool not_worth_splitting = best_k == 1;
+        if (not_worth_splitting)
             continue;
         best_cost = std::min(best_cost, single); // the saving below is against the whole net
         // the biggest cluster keeps the original
@@ -214,7 +235,8 @@ void XilinxImpl::replicate_merged_ffs()
         int keep = int(std::max_element(size.begin(), size.end()) - size.begin());
         int n = 0;
         for (int c = 0; c < best_k; c++) {
-            if (c == keep || size[c] == 0)
+            const bool keeps_original_or_empty = c == keep || size[c] == 0;
+            if (keeps_original_or_empty)
                 continue;
             n++;
             CellInfo *copy = ctx->createCell(ctx->idf("%s$dup%d", ci->name.c_str(ctx), n), id_SLICE_FFX);
@@ -223,18 +245,21 @@ void XilinxImpl::replicate_merged_ffs()
             copy->attrs.erase(id_MERGED_EQUIV);
             copy->region = ci->region; // a copy keeps to the original's floorplan
             for (auto &port : ci->ports) {
-                if (port.second.type == PORT_OUT)
+                const bool is_output = port.second.type == PORT_OUT;
+                if (is_output)
                     copy->addOutput(port.first);
                 else
                     copy->addInput(port.first);
-                if (port.second.type != PORT_OUT && port.second.net != nullptr)
+                const bool connected_input = port.second.type != PORT_OUT && port.second.net != nullptr;
+                if (connected_input)
                     copy->connectPort(port.first, port.second.net);
             }
             NetInfo *nq = ctx->createNet(ctx->idf("%s$dup%d$Q", ci->name.c_str(ctx), n));
             copy->connectPort(id_Q, nq);
             Copy cp{copy, best_centres[c], q, {}};
             for (size_t i = 0; i < sinks.size(); i++) {
-                if (best_assign[i] != c)
+                const bool in_another_cluster = best_assign[i] != c;
+                if (in_another_cluster)
                     continue;
                 sinks[i].cell->disconnectPort(sinks[i].port);
                 sinks[i].cell->connectPort(sinks[i].port, nq);
@@ -245,7 +270,8 @@ void XilinxImpl::replicate_merged_ffs()
         split++;
         saved += single - best_cost;
     }
-    if (copies.empty()) {
+    const bool nothing_split = copies.empty();
+    if (nothing_split) {
         log_info("replicate: %zu flip-flops (%zu merged by the synthesis), none worth splitting\n", merged.size(),
                  flagged);
         return;
@@ -267,13 +293,16 @@ void XilinxImpl::replicate_merged_ffs()
     auto driver_tiles_dirty = [&](const CellInfo *copy) {
         std::vector<BelId> drivers;
         for (auto &port : copy->ports) {
-            if (port.second.type == PORT_OUT || port.second.net == nullptr)
+            const bool not_a_driven_input = port.second.type == PORT_OUT || port.second.net == nullptr;
+            if (not_a_driven_input)
                 continue;
             const CellInfo *drv = port.second.net->driver.cell;
-            if (drv == nullptr || drv->bel == BelId())
+            const bool unplaced_driver = drv == nullptr || drv->bel == BelId();
+            if (unplaced_driver)
                 continue;
             auto &lts = tile_status.at(drv->bel.tile).lts;
-            if (!lts)
+            const bool no_logic_tile_status = !lts;
+            if (no_logic_tile_status)
                 continue;
             for (auto &eight : lts->eights)
                 eight.dirty = true;
@@ -284,9 +313,11 @@ void XilinxImpl::replicate_merged_ffs()
         return drivers;
     };
     auto drivers_stay_legal = [&](const CellInfo *copy) {
-        for (BelId bel : driver_tiles_dirty(copy))
-            if (!isBelLocationValid(bel))
+        for (BelId bel : driver_tiles_dirty(copy)) {
+            const bool driver_now_illegal = !isBelLocationValid(bel);
+            if (driver_now_illegal)
                 return false;
+        }
         return true;
     };
 
@@ -298,18 +329,24 @@ void XilinxImpl::replicate_merged_ffs()
         for (int r = 0; r <= search_radius && found == BelId() && drivers_can_reach_it; r++) {
             for (int dx = -r; dx <= r && found == BelId(); dx++) {
                 for (int dy = -r; dy <= r && found == BelId(); dy++) {
-                    if (std::max(std::abs(dx), std::abs(dy)) != r)
+                    const bool inside_the_ring = std::max(std::abs(dx), std::abs(dy)) != r;
+                    if (inside_the_ring)
                         continue;
                     int x = cp.centre.x + dx, y = cp.centre.y + dy;
-                    if (x < 0 || y < 0 || x >= ctx->getGridDimX() || y >= ctx->getGridDimY())
+                    const bool off_the_grid = x < 0 || y < 0 || x >= ctx->getGridDimX() || y >= ctx->getGridDimY();
+                    if (off_the_grid)
                         continue;
                     for (BelId bel : ctx->getBelsByTile(x, y)) {
-                        if (ctx->getBelType(bel) != id_SLICE_FFX || !ctx->checkBelAvail(bel))
+                        const bool not_a_free_ff = ctx->getBelType(bel) != id_SLICE_FFX || !ctx->checkBelAvail(bel);
+                        if (not_a_free_ff)
                             continue;
-                        if (region != nullptr && region->constr_bels && !region->bels.count(bel))
+                        const bool outside_region = region != nullptr && region->constr_bels &&
+                                                    !region->bels.count(bel);
+                        if (outside_region)
                             continue;
                         ctx->bindBel(bel, cp.cell, STRENGTH_WEAK);
-                        if (ctx->isBelLocationValid(bel)) {
+                        const bool legal_here = ctx->isBelLocationValid(bel);
+                        if (legal_here) {
                             found = bel;
                             break;
                         }
@@ -318,12 +355,14 @@ void XilinxImpl::replicate_merged_ffs()
                 }
             }
         }
-        if (found == BelId()) {
+        const bool not_placed = found == BelId();
+        if (not_placed) {
             // No site near the cluster, or a driver that cannot reach one: this
             // copy was not worth having.  Its sinks go back to the original,
             // whose placement is still legal, and the copy and its net
             // disappear.
-            if (drivers_can_reach_it)
+            const bool no_site_within_radius = drivers_can_reach_it;
+            if (no_site_within_radius)
                 log_warning("replicate: no free flip-flop site within %d tiles of (%d,%d) for '%s'; keeping the "
                             "original\n",
                             search_radius, cp.centre.x, cp.centre.y, ctx->nameOf(cp.cell));
@@ -338,9 +377,11 @@ void XilinxImpl::replicate_merged_ffs()
             driver_tiles_dirty(cp.cell); // the drivers' legality is cached with the copy among their users
             IdString copy_name = cp.cell->name;
             NetInfo *nq = cp.cell->getPort(id_Q);
-            for (auto &port : cp.cell->ports)
-                if (port.second.net != nullptr)
+            for (auto &port : cp.cell->ports) {
+                const bool is_connected = port.second.net != nullptr;
+                if (is_connected)
                     cp.cell->disconnectPort(port.first);
+            }
             ctx->nets.erase(nq->name);
             ctx->cells.erase(copy_name);
             undone++;

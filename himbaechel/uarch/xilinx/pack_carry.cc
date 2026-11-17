@@ -320,7 +320,8 @@ void XC7Packer::pack_carries()
                     s_dup_source = c4_s->driver.cell;
                     for (int j = 0; j < 6; j++) {
                         NetInfo *ix = s_dup_source->getPort(ctx->idf("I%d", j));
-                        if (ix) {
+                        const bool pin_connected = ix != nullptr;
+                        if (pin_connected) {
                             s_dup_inputs.insert(ix->name);
                             s_dup_nets.push_back(ix);
                         }
@@ -412,26 +413,33 @@ void XC7Packer::pack_carries()
             // carries the S net, and counts like any other.
             auto pins_fit = [](const std::vector<NetInfo *> &a, const std::vector<NetInfo *> &b) {
                 int need = int(a.size() + b.size()) - 5;
-                if (need <= 0)
+                const bool nothing_to_share = need <= 0;
+                if (nothing_to_share)
                     return true;
                 int shared = 0;
                 for (NetInfo *x : a)
-                    for (NetInfo *y : b)
-                        if (x == y)
+                    for (NetInfo *y : b) {
+                        const bool same_net = x == y;
+                        if (same_net)
                             shared++;
+                    }
                 return shared >= need;
             };
-            if (di_lut != nullptr) {
+            const bool di_has_lut = di_lut != nullptr;
+            if (di_has_lut) {
                 std::vector<NetInfo *> s_side;
-                if (s_lut != nullptr)
+                const bool s_is_driven = c4_s != nullptr;
+                const bool s_has_lut = s_lut != nullptr;
+                if (s_has_lut)
                     s_side = s_nets;
-                else if (c4_s != nullptr)
+                else if (s_is_driven)
                     s_side.push_back(c4_s);
                 const bool six_input_s = s_lut != nullptr && s_inputs >= 6;
                 if (six_input_s || !pins_fit(s_side, di_nets))
                     di_lut = nullptr; // DI takes the bypass pin or a feed-through of its own
             }
-            if (ctx->verbose)
+            const bool is_verbose = ctx->verbose;
+            if (is_verbose)
                 log_info("    carry %s position %d: S %s (%d inputs), DI %s (%d inputs), %d unique; S %s, DI %s\n",
                          ctx->nameOf(c4), z, c4_s ? ctx->nameOf(c4_s) : "-", s_inputs, c4_di ? ctx->nameOf(c4_di) : "-",
                          di_inputs, lut_inp_count, s_lut ? "LUT kept" : (c4_s ? "feed-through" : "unused"),
@@ -489,7 +497,8 @@ void XC7Packer::pack_carries()
         log_info("   Moved %d shared LUTs driving carry S inputs into the carry site.\n", moved);
     if (duplicated > 0)
         log_info("   Duplicated %d shared LUTs driving carry S inputs.\n", duplicated);
-    if (bypassed > 0)
+    const bool any_bypassed = bypassed > 0;
+    if (any_bypassed)
         log_info("   %d carry DI inputs take the bypass pin instead of a buffer LUT.\n", bypassed);
 
     for (auto net : folded_nets)

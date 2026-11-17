@@ -1800,41 +1800,50 @@ void XilinxImpl::pack()
     // clock does not reach (LUTs, carries) may lie up to that many tile rows
     // above or below it -- the clock sinks stay inside: packing a dense block
     // into exactly one region can be more than the greedy legaliser settles.
-    if (args.options.count("macro-region")) {
+    const bool has_macro_region = args.options.count("macro-region");
+    if (has_macro_region) {
         std::string spec = args.options["macro-region"].as<std::string>();
         size_t pos = 0;
         while (pos <= spec.size()) {
             size_t end = spec.find(',', pos);
-            if (end == std::string::npos)
+            const bool last_item = end == std::string::npos;
+            if (last_item)
                 end = spec.size();
             std::string item = spec.substr(pos, end - pos);
             pos = end + 1;
-            if (item.empty())
+            const bool empty_item = item.empty();
+            if (empty_item)
                 continue;
             int margin = 0;
             size_t colon = item.rfind(':');
-            if (colon != std::string::npos && colon + 1 < item.size() &&
-                item.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
+            const bool ends_in_number = colon != std::string::npos && colon + 1 < item.size() &&
+                                        item.find_first_not_of("0123456789", colon + 1) == std::string::npos;
+            if (ends_in_number) {
                 size_t c2 = item.rfind(':', colon - 1);
-                if (c2 != std::string::npos && colon > 0) {
+                const bool has_rows_field = c2 != std::string::npos && colon > 0;
+                if (has_rows_field) {
                     margin = std::stoi(item.substr(colon + 1));
                     item = item.substr(0, colon);
                     colon = c2;
                 }
             }
-            if (colon == std::string::npos || colon == 0 || colon + 1 == item.size())
+            const bool malformed_item = colon == std::string::npos || colon == 0 || colon + 1 == item.size();
+            if (malformed_item)
                 log_error("macro-region: '%s' is not <prefix>:<buffer cell>[:<rows>]\n", item.c_str());
             std::string prefix = item.substr(0, colon);
             IdString buf = ctx->id(item.substr(colon + 1));
             IdString rname = ctx->id("clkregion_" + buf.str(ctx));
-            if (!ctx->cells.count(buf))
+            const bool no_such_cell = !ctx->cells.count(buf);
+            if (no_such_cell)
                 log_error("macro-region: no cell '%s'\n", buf.c_str(ctx));
-            if (!ctx->region.count(rname))
+            const bool no_clock_region = !ctx->region.count(rname);
+            if (no_clock_region)
                 log_error("macro-region: '%s' has no clock region (is it a placed BUFHCE/BUFR/BUFIO with sinks?)\n",
                           buf.c_str(ctx));
             auto has_prefix = [&](const CellInfo *c) { return c->name.str(ctx).compare(0, prefix.size(), prefix) == 0; };
             IdString target = rname;
-            if (margin > 0) {
+            const bool has_margin = margin > 0;
+            if (has_margin) {
                 int x0 = std::numeric_limits<int>::max(), y0 = x0, x1 = -1, y1 = -1;
                 for (BelId b : ctx->region.at(rname)->bels) {
                     Loc l = ctx->getBelLocation(b);
@@ -1851,22 +1860,27 @@ void XilinxImpl::pack()
             int n = 0, matched = 0, outside = 0, conflicts = 0;
             for (auto &cell : ctx->cells) {
                 CellInfo *ci = cell.second.get();
-                if (!has_prefix(ci))
+                const bool not_under_prefix = !has_prefix(ci);
+                if (not_under_prefix)
                     continue;
                 ++matched;
                 CellInfo *tgt = ci->cluster != IdString() ? ctx->getClusterRootCell(ci->cluster) : ci;
                 // a cluster rooted outside the block stays where its root goes
-                if (!has_prefix(tgt)) {
+                const bool rooted_outside = !has_prefix(tgt);
+                if (rooted_outside) {
                     ++outside;
                     continue;
                 }
-                if (tgt->bel != BelId())
+                const bool already_placed = tgt->bel != BelId();
+                if (already_placed)
                     continue;
-                if (tgt->region != nullptr) {
+                const bool already_in_a_region = tgt->region != nullptr;
+                if (already_in_a_region) {
                     // its own clock region (a sink of the buffer) lies inside
                     // the macro region; any other region is a contradiction,
                     // not something to pass over quietly
-                    if (tgt->region->name != rname && tgt->region->name != target) {
+                    const bool in_another_region = tgt->region->name != rname && tgt->region->name != target;
+                    if (in_another_region) {
                         log_warning("macro-region: '%s' is already constrained to region '%s', not to '%s'\n",
                                     tgt->name.c_str(ctx), tgt->region->name.c_str(ctx), target.c_str(ctx));
                         ++conflicts;
@@ -1876,9 +1890,11 @@ void XilinxImpl::pack()
                 ctx->constrainCellToRegion(tgt->name, target);
                 ++n;
             }
-            if (matched == 0)
+            const bool nothing_matched = matched == 0;
+            if (nothing_matched)
                 log_error("macro-region: no cell name begins with '%s'\n", prefix.c_str());
-            if (conflicts > 0)
+            const bool has_conflicts = conflicts > 0;
+            if (has_conflicts)
                 log_error("macro-region: %d cell(s) under '%s' are constrained to another region; one block, one "
                           "region\n",
                           conflicts, prefix.c_str());

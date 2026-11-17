@@ -396,19 +396,25 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             // Position A of the lower slice has no route-through (its LUT
             // serves the ground driver, see is_pip_unavail).
             const bool route_through_available = ff_routethru_pips && lut6 == nullptr && lut5 == nullptr && i != 0;
-            if (ff2_indirect) {
-                if (x_net == nullptr)
+            const bool the_5ff_comes_in_through_x = ff2_indirect;
+            if (the_5ff_comes_in_through_x) {
+                const bool x_carries_another_net = x_net != ff2->ff.d;
+                const bool x_is_free = x_net == nullptr;
+                if (x_is_free)
                     x_net = ff2->ff.d;
-                else if (x_net != ff2->ff.d) {
+                else if (x_carries_another_net) {
                     DBG();
                     return false;
                 }
             }
-            if (ff1_indirect) {
-                if (x_net == nullptr || x_net == ff1->ff.d) {
+            const bool the_main_ff_comes_in_from_the_fabric = ff1_indirect;
+            if (the_main_ff_comes_in_from_the_fabric) {
+                const bool no_route_through = !route_through_available;
+                const bool x_is_free_or_carries_its_net = x_net == nullptr || x_net == ff1->ff.d;
+                if (x_is_free_or_carries_its_net) {
                     x_net = ff1->ff.d;
                     ff1_uses_x = true;
-                } else if (!route_through_available) {
+                } else if (no_route_through) {
                     DBG();
                     return false;
                 }
@@ -686,7 +692,8 @@ void XilinxImpl::explain_invalid_logic_tile(BelId bel) const
 
 bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
-    if (prw_active) {
+    const bool placing_into_a_window = prw_active;
+    if (placing_into_a_window) {
         // a window cell outside the window, or any other cell inside it
         const CellInfo *ci = ctx->getBoundBelCell(bel);
         const bool bel_is_in_the_window = prw_tile[bel.tile] != 0;

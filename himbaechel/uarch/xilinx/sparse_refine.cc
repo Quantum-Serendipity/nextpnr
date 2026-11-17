@@ -55,7 +55,9 @@ struct Box
 
 void XilinxImpl::refine_sparse_bels()
 {
-    if (ctx->args.options.count("sparse-refine") && ctx->args.options.at("sparse-refine").as<std::string>() == "off")
+    const bool refine_disabled = ctx->args.options.count("sparse-refine") &&
+                                 ctx->args.options.at("sparse-refine").as<std::string>() == "off";
+    if (refine_disabled)
         return;
     const int radius = 80;        // tiles, Manhattan, from the cell's current site
     const int max_passes = 8;
@@ -71,19 +73,22 @@ void XilinxImpl::refine_sparse_bels()
     std::map<IdString, std::vector<BelId>> free_bels;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        if (!sparse_types.count(ci->type) || ci->bel == BelId())
+        const bool not_a_placed_sparse_cell = !sparse_types.count(ci->type) || ci->bel == BelId();
+        if (not_a_placed_sparse_cell)
             continue;
         const bool pinned_or_in_a_cascade = ci->belStrength > STRENGTH_STRONG || ci->cluster != ClusterId();
         if (pinned_or_in_a_cascade)
             continue;
         cells.push_back(ci);
     }
-    if (cells.empty())
+    const bool nothing_to_move = cells.empty();
+    if (nothing_to_move)
         return;
     std::sort(cells.begin(), cells.end(), [](CellInfo *a, CellInfo *b) { return a->name < b->name; });
     for (auto bel : ctx->getBels()) {
         IdString type = ctx->getBelType(bel);
-        if (sparse_types.count(type) && ctx->checkBelAvail(bel))
+        const bool free_sparse_bel = sparse_types.count(type) && ctx->checkBelAvail(bel);
+        if (free_sparse_bel)
             free_bels[type].push_back(bel);
     }
 
@@ -91,7 +96,8 @@ void XilinxImpl::refine_sparse_bels()
     auto others_box = [&](NetInfo *net, CellInfo *except) {
         Box b;
         auto add = [&](CellInfo *c) {
-            if (c == nullptr || c == except || c->bel == BelId())
+            const bool not_another_placed_pin = c == nullptr || c == except || c->bel == BelId();
+            if (not_another_placed_pin)
                 return;
             Loc l = ctx->getBelLocation(c->bel);
             b.add(l.x, l.y);
@@ -113,7 +119,8 @@ void XilinxImpl::refine_sparse_bels()
             pool<IdString> seen;
             for (auto &port : ci->ports) {
                 NetInfo *net = port.second.net;
-                if (net == nullptr || seen.count(net->name) || net->users.entries() > big_net)
+                const bool skip_net = net == nullptr || seen.count(net->name) || net->users.entries() > big_net;
+                if (skip_net)
                     continue;
                 seen.insert(net->name);
                 boxes.push_back(others_box(net, ci));
@@ -135,23 +142,28 @@ void XilinxImpl::refine_sparse_bels()
             // region, a pblock) stays in it
             const Region *region = ci->region;
             for (BelId bel : candidates) {
-                if (region != nullptr && region->constr_bels && !region->bels.count(bel))
+                const bool outside_region = region != nullptr && region->constr_bels && !region->bels.count(bel);
+                if (outside_region)
                     continue;
                 Loc l = ctx->getBelLocation(bel);
-                if (std::abs(l.x - here.x) + std::abs(l.y - here.y) > radius)
+                const bool too_far = std::abs(l.x - here.x) + std::abs(l.y - here.y) > radius;
+                if (too_far)
                     continue;
                 int64_t c = cost_at(l);
-                if (c < best_cost) {
+                const bool cheaper = c < best_cost;
+                if (cheaper) {
                     best_cost = c;
                     best = bel;
                 }
             }
-            if (best == BelId())
+            const bool no_better_site = best == BelId();
+            if (no_better_site)
                 continue;
             BelId old = ci->bel;
             ctx->unbindBel(old);
             ctx->bindBel(best, ci, STRENGTH_WEAK);
-            if (!ctx->isBelLocationValid(best)) {
+            const bool invalid_there = !ctx->isBelLocationValid(best);
+            if (invalid_there) {
                 ctx->unbindBel(best);
                 ctx->bindBel(old, ci, STRENGTH_WEAK);
                 continue;
@@ -164,9 +176,11 @@ void XilinxImpl::refine_sparse_bels()
             gain_total += cost_here - best_cost;
         }
         moved_total += moved;
-        if (ctx->verbose)
+        const bool is_verbose = ctx->verbose;
+        if (is_verbose)
             log_info("    sparse-refine pass %d: %d cells moved\n", pass, moved);
-        if (moved == 0)
+        const bool pass_moved_nothing = moved == 0;
+        if (pass_moved_nothing)
             break;
     }
     log_info("sparse-refine: %zu of %zu DSP/BRAM cells moved to a nearer free site (%d moves), wirelength down by %lld\n",

@@ -119,7 +119,8 @@ void XilinxPacker::preplace_unique(CellInfo *cell)
     // says otherwise, and an ICAPE2 on the bottom site reads back only zeros
     // (measured on an xc7vx485t and an xc7a50t), so the first free site is the
     // wrong default for this one.
-    if (cell->type == id_ICAP_ICAP) {
+    const bool is_icap = cell->type == id_ICAP_ICAP;
+    if (is_icap) {
         for (auto bel : ctx->getBels()) {
             const bool is_a_free_top_icap = ctx->getBelType(bel) == cell->type && claimed.count(bel) == 0 &&
                                             ctx->checkBelAvail(bel) &&
@@ -612,6 +613,8 @@ void XilinxImpl::route_clocks()
                                  (*clk_net->users.begin()).cell->type == id_BUFR_BUFR &&
                                  (*clk_net->users.begin()).port == id_I;
         bool is_global = false;
+        // Compared as a string: ctx->id() would intern the name on every build.
+        const bool driven_by_partition_pin = clk_net->driver.cell->type.str(ctx) == "PARTPIN_IN";
         if ((clk_net->driver.cell->type.in(id_BUFGCTRL, id_BUFCE_BUFG_PS, id_BUFCE_BUFCE, id_BUFGCE_DIV_BUFGCE_DIV)) &&
             clk_net->driver.port == id_O)
             is_global = true;
@@ -627,14 +630,15 @@ void XilinxImpl::route_clocks()
                  (*clk_net->users.begin()).cell->type.in(id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV) &&
                  (*clk_net->users.begin()).port == id_CLKIN1)
             is_global = true;
-        else if (clk_net->driver.cell->type.str(ctx) == "PARTPIN_IN") {
+        else if (driven_by_partition_pin) {
             // A window build's clock enters on a partition pin (an HROW line
             // node): keep it on the dedicated tree, as a BUFG's net would be,
             // or the router spreads it over the fabric and skews every flop.
-            // Compared as a string: ctx->id() would intern the name on every build.
-            for (auto &usr : clk_net->users)
-                if (usr.port.in(id_CK, id_CLK, id_C))
+            for (auto &usr : clk_net->users) {
+                const bool is_a_clock_pin = usr.port.in(id_CK, id_CLK, id_C);
+                if (is_a_clock_pin)
                     is_global = true;
+            }
         }
         if (!is_global)
             continue;
@@ -673,7 +677,8 @@ void XilinxImpl::route_clocks()
                     break;
                 }
                 for (auto uh : ctx->getPipsUphill(curr)) {
-                    if (!ctx->checkPipAvailForNet(uh, clk_net))
+                    const bool pip_unavailable = !ctx->checkPipAvailForNet(uh, clk_net);
+                    if (pip_unavailable)
                         continue;
                     WireId src = ctx->getPipSrcWire(uh);
                     if (backtrace.count(src))
@@ -707,7 +712,8 @@ void XilinxImpl::route_clocks()
                             break;
                         }
                         for (auto uh : ctx->getPipsUphill(curr)) {
-                            if (!ctx->checkPipAvailForNet(uh, clk_net))
+                            const bool pip_unavailable = !ctx->checkPipAvailForNet(uh, clk_net);
+                            if (pip_unavailable)
                                 continue;
                             WireId src = ctx->getPipSrcWire(uh);
                             if (backtrace.count(src))

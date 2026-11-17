@@ -57,7 +57,8 @@ NEXTPNR_NAMESPACE_BEGIN
 void XilinxImpl::init_pr_window()
 {
     const ArchArgs &args = ctx->args;
-    if (!args.options.count("pr-window"))
+    const bool no_window_option = !args.options.count("pr-window");
+    if (no_window_option)
         return;
     std::string spec = args.options.at("pr-window").as<std::string>();
     std::vector<std::string> parts;
@@ -74,7 +75,8 @@ void XilinxImpl::init_pr_window()
             prw_x0 < 0 || prw_y0 < 0 || prw_x1 >= w || prw_y1 >= h || prw_x0 > prw_x1 || prw_y0 > prw_y1;
     if (rectangle_is_off_the_grid)
         log_error("-o pr-window=%s is not a rectangle inside the %dx%d tile grid\n", spec.c_str(), w, h);
-    if (!args.options.count("pr-cells"))
+    const bool no_cells_prefix = !args.options.count("pr-cells");
+    if (no_cells_prefix)
         log_error("-o pr-window needs -o pr-cells=<name prefix of the cells inside>\n");
     prw_prefix = args.options.at("pr-cells").as<std::string>();
     prw_tile.assign(w * h, 0);
@@ -92,9 +94,11 @@ void XilinxImpl::init_pr_window()
 // prefix test covers them too.
 bool XilinxImpl::pr_window_cell(const CellInfo *ci) const
 {
-    if (ci == nullptr)
+    const bool no_cell = ci == nullptr;
+    if (no_cell)
         return false;
-    if (prw_cells.count(ci->name))
+    const bool is_listed_window_cell = prw_cells.count(ci->name) != 0;
+    if (is_listed_window_cell)
         return true;
     return boost::starts_with(ci->name.str(ctx), prw_prefix);
 }
@@ -112,7 +116,8 @@ bool XilinxImpl::pr_window_cell(const CellInfo *ci) const
 static int pr_window_classify(const XilinxImpl *impl, const NetInfo *net)
 {
     int inside = 0, outside = 0;
-    if (net->driver.cell != nullptr)
+    const bool has_driver = net->driver.cell != nullptr;
+    if (has_driver)
         (impl->pr_window_cell(net->driver.cell) ? inside : outside)++;
     for (auto &usr : net->users)
         (impl->pr_window_cell(usr.cell) ? inside : outside)++;
@@ -130,7 +135,8 @@ int XilinxImpl::pr_window_net_class(const NetInfo *net) const
 // entries (hold-fix buffers move sinks to new nets), so this rebuilds the table.
 void XilinxImpl::pr_window_index_nets()
 {
-    if (!prw_active)
+    const bool no_window = !prw_active;
+    if (no_window)
         return;
     int max_idx = -1;
     for (auto &net : ctx->nets)
@@ -144,14 +150,18 @@ bool XilinxImpl::pr_window_net(const NetInfo *net) const { return pr_window_net_
 
 bool XilinxImpl::checkPipAvailForNet(PipId pip, const NetInfo *net) const
 {
-    if (is_pip_unavail(pip))
+    const bool pip_unavailable = is_pip_unavail(pip);
+    if (pip_unavailable)
         return false;
-    if (prw_active && net != nullptr) {
+    const bool window_applies = prw_active && net != nullptr;
+    if (window_applies) {
         const bool pip_is_in_the_window = prw_tile[pip.tile] != 0;
         const int cls = pr_window_net_class(net);
-        if (pip_is_in_the_window && cls == 0)
+        const bool static_net_enters_the_window = pip_is_in_the_window && cls == 0;
+        if (static_net_enters_the_window)
             return false;
-        if (!pip_is_in_the_window && cls == 2)
+        const bool internal_net_leaves_the_window = !pip_is_in_the_window && cls == 2;
+        if (internal_net_leaves_the_window)
             return false;
     }
     return true;
@@ -165,34 +175,41 @@ bool XilinxImpl::checkPipAvailForNet(PipId pip, const NetInfo *net) const
 void XilinxImpl::pr_window_reserve()
 {
     const ArchArgs &args = ctx->args;
-    if (!args.options.count("pr-reserve"))
+    const bool no_reserve_file = !args.options.count("pr-reserve");
+    if (no_reserve_file)
         return;
     std::string path = args.options.at("pr-reserve").as<std::string>();
     std::ifstream in(path);
-    if (!in)
+    const bool cannot_open = !in;
+    if (cannot_open)
         log_error("cannot read -o pr-reserve=%s\n", path.c_str());
     std::string line;
     int n = 0;
     while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#')
+        const bool blank_or_comment = line.empty() || line[0] == '#';
+        if (blank_or_comment)
             continue;
         BelId bel = ctx->getBelByNameStr(line);
-        if (bel == BelId())
+        const bool no_such_bel = bel == BelId();
+        if (no_such_bel)
             log_error("-o pr-reserve: no bel named '%s'\n", line.c_str());
         WireId w;
         for (IdString pin : ctx->getBelPins(bel)) {
             w = ctx->getBelPinWire(bel, pin);
             break;
         }
-        if (w == WireId())
+        const bool no_pin_wire = w == WireId();
+        if (no_pin_wire)
             log_error("-o pr-reserve: bel '%s' has no pin wire\n", line.c_str());
         NetInfo *bound = ctx->getBoundWireNet(w);
-        if (bound != nullptr)
+        const bool wire_already_bound = bound != nullptr;
+        if (wire_already_bound)
             log_error("-o pr-reserve: wire %s of bel '%s' is already used by net '%s'\n", ctx->nameOfWire(w),
                       line.c_str(), bound->name.c_str(ctx));
         // withheld through checkWireAvail rather than bound to a net: a
         // driverless net with wires trips router1's final check
-        if (prw_reserved_wires.insert(w).second)
+        const bool newly_reserved = prw_reserved_wires.insert(w).second;
+        if (newly_reserved)
             n++;
     }
     log_info("PR window: %d wires reserved from %s\n", n, path.c_str());
@@ -200,7 +217,8 @@ void XilinxImpl::pr_window_reserve()
 
 void XilinxImpl::pr_window_constrain_cells()
 {
-    if (!prw_active)
+    const bool no_window = !prw_active;
+    if (no_window)
         return;
     IdString rname = ctx->id("$PR_WINDOW");
     ctx->createRectangularRegion(rname, prw_x0, prw_y0, prw_x1, prw_y1);
@@ -209,9 +227,11 @@ void XilinxImpl::pr_window_constrain_cells()
     dict<ClusterId, std::vector<CellInfo *>> clusters;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        if (pr_window_cell(ci))
+        const bool is_window_cell = pr_window_cell(ci);
+        if (is_window_cell)
             prw_cells.insert(ci->name);
-        if (ci->cluster != ClusterId())
+        const bool in_a_cluster = ci->cluster != ClusterId();
+        if (in_a_cluster)
             clusters[ci->cluster].push_back(ci);
     }
     int pulled_in = 0;
@@ -219,10 +239,12 @@ void XilinxImpl::pr_window_constrain_cells()
         bool any_inside = false;
         for (CellInfo *ci : cl.second)
             any_inside |= prw_cells.count(ci->name) != 0;
-        if (!any_inside)
+        const bool cluster_is_outside = !any_inside;
+        if (cluster_is_outside)
             continue;
         for (CellInfo *ci : cl.second) {
-            if (prw_cells.count(ci->name))
+            const bool already_a_window_cell = prw_cells.count(ci->name) != 0;
+            if (already_a_window_cell)
                 continue;
             prw_cells.insert(ci->name);
             pulled_in++;
@@ -232,12 +254,14 @@ void XilinxImpl::pr_window_constrain_cells()
     int n = 0;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        if (!prw_cells.count(ci->name))
+        const bool not_a_window_cell = !prw_cells.count(ci->name);
+        if (not_a_window_cell)
             continue;
         ctx->constrainCellToRegion(ci->name, rname);
         n++;
     }
-    if (pulled_in != 0)
+    const bool clusters_pulled_cells_in = pulled_in != 0;
+    if (clusters_pulled_cells_in)
         log_warning("PR window: %d cells outside the prefix were pulled into the window by their clusters\n", pulled_in);
     const bool nothing_matched_the_prefix = n == 0;
     if (nothing_matched_the_prefix)
@@ -256,7 +280,8 @@ void XilinxImpl::pr_window_constrain_cells()
 // the window build must then drive or consume every one of its nodes.
 void XilinxImpl::pr_window_report()
 {
-    if (!prw_active)
+    const bool no_window = !prw_active;
+    if (no_window)
         return;
     pr_window_index_nets(); // the verdict below is on the final connectivity
     auto real_wire_name = [&](WireId w) {
@@ -270,17 +295,21 @@ void XilinxImpl::pr_window_report()
     for (auto &net : ctx->nets) {
         NetInfo *ni = net.second.get();
         const int cls = pr_window_net_class(ni);
-        if (cls == 0 || cls == 2) {
+        const bool is_static_or_internal = cls == 0 || cls == 2;
+        if (is_static_or_internal) {
             for (auto &w : ni->wires) {
                 PipId p = w.second.pip;
-                if (p == PipId())
+                const bool no_pip = p == PipId();
+                if (no_pip)
                     continue;
                 const bool pip_is_in_the_window = prw_tile[p.tile] != 0;
-                if (cls == 0 && pip_is_in_the_window) {
+                const bool internal_pip_outside = cls == 2 && !pip_is_in_the_window;
+                const bool static_pip_inside = cls == 0 && pip_is_in_the_window;
+                if (static_pip_inside) {
                     log_warning("PR window: static net '%s' uses pip %s inside the window\n", ni->name.c_str(ctx),
                                 ctx->nameOfPip(p));
                     static_pips_inside++;
-                } else if (cls == 2 && !pip_is_in_the_window) {
+                } else if (internal_pip_outside) {
                     log_warning("PR window: internal net '%s' uses pip %s outside the window\n", ni->name.c_str(ctx),
                                 ctx->nameOfPip(p));
                     static_pips_inside++;
@@ -289,15 +318,18 @@ void XilinxImpl::pr_window_report()
             continue;
         }
         // the constant nets reach the window through its own tie-off wires, not a boundary
-        if (ni->constant_value != IdString())
+        const bool is_constant_net = ni->constant_value != IdString();
+        if (is_constant_net)
             continue;
         // the side a bound wire is driven from: its pip's tile, or the driver's bel for the source
         auto driven_inside = [&](WireId w) -> int {
             auto it = ni->wires.find(w);
-            if (it == ni->wires.end())
+            const bool wire_not_on_the_net = it == ni->wires.end();
+            if (wire_not_on_the_net)
                 return -1;
             PipId p = it->second.pip;
-            if (p != PipId())
+            const bool driven_by_a_pip = p != PipId();
+            if (driven_by_a_pip)
                 return prw_tile[p.tile] != 0;
             const bool driver_has_a_bel = ni->driver.cell != nullptr && ni->driver.cell->bel != BelId();
             return driver_has_a_bel ? (prw_tile[ni->driver.cell->bel.tile] != 0) : -1;
@@ -309,12 +341,14 @@ void XilinxImpl::pr_window_report()
         dict<WireId, int8_t> clean_memo;
         std::function<bool(WireId)> clean = [&](WireId w) -> bool {
             auto m = clean_memo.find(w);
-            if (m != clean_memo.end())
+            const bool memoised = m != clean_memo.end();
+            if (memoised)
                 return m->second != 0;
             clean_memo[w] = 1; // against cycles
             auto it = ni->wires.find(w);
             bool ok = true;
-            if (it != ni->wires.end() && it->second.pip != PipId()) {
+            const bool reached_by_a_pip = it != ni->wires.end() && it->second.pip != PipId();
+            if (reached_by_a_pip) {
                 PipId p = it->second.pip;
                 const bool driver_inside =
                         ni->driver.cell != nullptr && ni->driver.cell->bel != BelId() && prw_tile[ni->driver.cell->bel.tile] != 0;
@@ -327,7 +361,8 @@ void XilinxImpl::pr_window_report()
         int ins = 0, outs = 0;
         for (auto &w : ni->wires) {
             PipId p = w.second.pip;
-            if (p == PipId())
+            const bool no_pip = p == PipId();
+            if (no_pip)
                 continue;
             WireId s = ctx->getPipSrcWire(p);
             const int src_inside = driven_inside(s);
@@ -341,7 +376,8 @@ void XilinxImpl::pr_window_report()
             (dst_inside ? ins : outs)++;
             std::string name = real_wire_name(s);
             std::string line = stringf("%s\t%s\t%s", ni->name.c_str(ctx), dir, name.c_str());
-            if (seen_lines.count(line))
+            const bool line_already_reported = seen_lines.count(line) != 0;
+            if (line_already_reported)
                 continue;
             seen_lines.insert(line);
             log_info("PR window: net '%s' crosses %s at %s (consumed by %s)\n", ni->name.c_str(ctx), dir, name.c_str(),
@@ -357,13 +393,16 @@ void XilinxImpl::pr_window_report()
                         ins + outs, ins, outs);
     }
     log_info("PR window: %d crossing nets, %zu boundary nodes\n", crossing_nets, lines.size());
-    if (static_pips_inside != 0)
+    const bool window_is_not_reconfigurable = static_pips_inside != 0;
+    if (window_is_not_reconfigurable)
         log_error("PR window: %d pip(s) of static nets inside the window or of internal nets outside it; the window "
                   "is not reconfigurable\n", static_pips_inside);
-    if (ctx->args.options.count("pr-interface")) {
+    const bool wants_interface_file = ctx->args.options.count("pr-interface") != 0;
+    if (wants_interface_file) {
         std::string path = ctx->args.options.at("pr-interface").as<std::string>();
         std::ofstream out(path);
-        if (!out)
+        const bool cannot_write = !out;
+        if (cannot_write)
             log_error("cannot write -o pr-interface=%s\n", path.c_str());
         for (auto &l : lines)
             out << l << "\n";

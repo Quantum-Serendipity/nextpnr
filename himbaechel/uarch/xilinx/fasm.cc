@@ -969,10 +969,19 @@ struct FasmBackend
                 pop();
             }
         }
+        BelId bel_in_half =
+                ctx->getBelByLocation(Loc(tile % ctx->chip_info->width, tile / ctx->chip_info->width, half << 6));
+        if (!lts) {
+            // A tile with no cell placed in it can still carry route-throughs, and
+            // one that leaves the slice through the xMUX output needs its OUTMUX
+            // feature as much as a placed LUT does (written below for used tiles):
+            // without it the bitstream drives the sink from the mux's default leg.
+            for (int i = 0; i < 4; i++)
+                if (lut_route_throughs.count(std::make_pair(tile, half * 4 + i)))
+                    write_routing_bel(get_site_wire(bel_in_half, stringf("%cMUX", "ABCD"[i])));
+        }
         if (lts) {
             // Write logic
-            BelId bel_in_half =
-                    ctx->getBelByLocation(Loc(tile % ctx->chip_info->width, tile / ctx->chip_info->width, half << 6));
 
             for (int i = 0; i < 4; i++) {
                 CellInfo *lut6 = lts->cells[(half << 6) | (i << 4) | BEL_6LUT];

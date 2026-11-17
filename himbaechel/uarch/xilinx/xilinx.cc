@@ -220,6 +220,8 @@ void XilinxImpl::init(Context *ctx)
 {
     h.init(ctx);
     HimbaechelAPI::init(ctx);
+    for (int i = 0; i < 6; i++)
+        x_orig_port_ids[i] = ctx->id(stringf("X_ORIG_PORT_A%d", i + 1));
 
     // Resolve the repeated-name bel types once (the placer looks buckets up per
     // cell); everything else buckets as its own type.
@@ -1597,8 +1599,7 @@ bool XilinxImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString 
     const bool is_lut = cell->type == id_SLICE_LUTX;
     if (is_lut) {
         static const IdString pins[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
-        static const IdString orig[6] = {ctx->id("X_ORIG_PORT_A1"), ctx->id("X_ORIG_PORT_A2"), ctx->id("X_ORIG_PORT_A3"),
-                                         ctx->id("X_ORIG_PORT_A4"), ctx->id("X_ORIG_PORT_A5"), ctx->id("X_ORIG_PORT_A6")};
+        const IdString *orig = x_orig_port_ids; // this context's, not a static's from the first context
         for (int i = 0; i < 6; i++) {
             const bool other_pin = fromPort != pins[i];
             if (other_pin)
@@ -1623,8 +1624,6 @@ void XilinxImpl::postRoute()
     // Again: the hold-fix buffers are LUT cells, and FASM is written next.
     check_part_limits();
     fixup_routing();
-    // After the last timing analysis (hold-fix runs one).
-    name_clocks_after_ports();
     ctx->assignArchInfo();
     // The router's own timing report came before fixup_routing re-bound the permuted LUT inputs, so it used estimates for
     // them; analyse again, so the logged Fmax and --report agree with the SDF.
@@ -1634,6 +1633,9 @@ void XilinxImpl::postRoute()
         timing_analysis(ctx, false /*histogram*/, true /*fmax*/, ctx->detailed_timing_report /*path*/, false /*warn*/,
                         true /*update_results*/);
     }
+    // After the last timing analysis: hold-fix runs one, and so does the re-bind above, and each keys the results by
+    // net name again, while --report should carry the port names.
+    name_clocks_after_ports();
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
         write_fasm(args.options["fasm"].as<std::string>());

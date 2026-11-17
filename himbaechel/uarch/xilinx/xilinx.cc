@@ -1497,6 +1497,49 @@ const char *bram_write_mode_code(const CellInfo *ci, IdString param)
 }
 } // namespace
 
+// The chipdb times a RAMB36E1 against its logical clock pins, CLKARDCLK and
+// CLKBWRCLK (the SDF's names), but the packed cell carries the two halves'
+// pins CLKARDCLKL/U and CLKBWRCLKL/U.  Left to the chipdb lookup, those pins
+// are combinational inputs and the registered pins' clock is a port the cell
+// does not have, so nothing into or out of a RAMB36E1 was timed: its data
+// outputs looked like free sources and its address pins like free sinks.
+// The halves are clocks, and the registered pins clock from the L half (both
+// halves carry the same net, pack.cc).
+namespace {
+IdString ramb36_logical_clock(const Context *ctx, IdString port)
+{
+    const std::string &p = port.str(ctx);
+    if (p == "CLKARDCLKL" || p == "CLKARDCLKU")
+        return ctx->id("CLKARDCLK");
+    if (p == "CLKBWRCLKL" || p == "CLKBWRCLKU")
+        return ctx->id("CLKBWRCLK");
+    return IdString();
+}
+} // namespace
+
+TimingPortClass XilinxImpl::getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const
+{
+    if (cell->type == id_RAMB36E1_RAMB36E1 && ramb36_logical_clock(ctx, port) != IdString()) {
+        clockInfoCount = 0;
+        return TMG_CLOCK_INPUT;
+    }
+    return HimbaechelAPI::getPortTimingClass(cell, port, clockInfoCount);
+}
+
+TimingClockingInfo XilinxImpl::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
+{
+    TimingClockingInfo info = HimbaechelAPI::getPortClockingInfo(cell, port, index);
+    if (cell->type == id_RAMB36E1_RAMB36E1) {
+        const std::string c = info.clock_port.str(ctx);
+        if (c == "CLKARDCLK" || c == "CLKBWRCLK") {
+            const IdString half = ctx->idf("%sL", c.c_str());
+            if (cell->ports.count(half))
+                info.clock_port = half;
+        }
+    }
+    return info;
+}
+
 void XilinxImpl::assign_cell_tags()
 {
     cell_tags.resize(ctx->cells.size());

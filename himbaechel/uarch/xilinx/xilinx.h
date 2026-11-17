@@ -132,6 +132,9 @@ struct XilinxImpl : HimbaechelAPI
     ~XilinxImpl();
     po::options_description getUArchOptions() override;
     void init_database(Arch *arch) override;
+    // Timing of a RAMB36E1, whose clock pins are the two halves' (xilinx.cc)
+    TimingPortClass getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const override;
+    TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const override;
 
     void init(Context *ctx) override;
     void assign_cell_tags(); // the legality tags of every cell (tests call it directly)

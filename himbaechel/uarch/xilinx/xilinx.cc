@@ -1679,13 +1679,15 @@ bool XilinxImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString 
 
 void XilinxImpl::postRoute()
 {
-    pr_window_report();
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
     // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
     // Again: the hold-fix buffers are LUT cells, and FASM is written next.
     check_part_limits();
     fixup_routing();
+    // The window verdict and -o pr-interface describe the routing as written: after the hold buffers and detours
+    // hold-fix added and the pips the re-bind above moved, not the router's first result.
+    pr_window_report();
     ctx->assignArchInfo();
     // The router's own timing report came before fixup_routing re-bound the permuted LUT inputs, so it used estimates for
     // them; analyse again, so the logged Fmax and --report agree with the SDF.

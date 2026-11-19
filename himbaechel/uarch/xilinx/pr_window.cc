@@ -45,6 +45,7 @@
  */
 
 #include <boost/algorithm/string.hpp>
+#include <cstring>
 #include <fstream>
 #include <functional>
 
@@ -100,7 +101,8 @@ bool XilinxImpl::pr_window_cell(const CellInfo *ci) const
     const bool is_listed_window_cell = prw_cells.count(ci->name) != 0;
     if (is_listed_window_cell)
         return true;
-    return boost::starts_with(ci->name.str(ctx), prw_prefix);
+    // the placer asks this for every legality check: compare in place, no copy of the name
+    return std::strncmp(ci->name.c_str(ctx), prw_prefix.c_str(), prw_prefix.size()) == 0;
 }
 
 // 0: a static net (no pin inside), 1: a crossing net (pins on both sides),

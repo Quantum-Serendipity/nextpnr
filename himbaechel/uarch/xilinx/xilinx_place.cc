@@ -1132,6 +1132,12 @@ void XilinxImpl::fixup_routing()
                 conflict++;
                 log_warning("permuted LUT input of net '%s': identity pip %s is held by net '%s', not re-bound\n",
                             b.net->name.c_str(ctx), ctx->nameOfPip(b.new_pip), (pn ? pn : wn)->name.c_str(ctx));
+                // The old pip was unbound above; put it back so the input keeps a route (timed as an estimate, as
+                // before this block), unless an identity pip bound earlier in this loop took its wire.
+                const bool old_end_is_free = ctx->getBoundPipNet(b.old_pip) == nullptr &&
+                                             ctx->getBoundWireNet(ctx->getPipDstWire(b.old_pip)) == nullptr;
+                if (old_end_is_free)
+                    ctx->bindPip(b.old_pip, b.net, b.strength);
                 continue;
             }
             ctx->bindPip(b.new_pip, b.net, b.strength);

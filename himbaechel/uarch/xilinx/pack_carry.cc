@@ -411,19 +411,15 @@ void XC7Packer::pack_carries()
             // nets, pair by pair, and a six-input 6LUT leaves no 5LUT at all
             // (it uses A6).  An S feed-through is a one-input LUT whose pin
             // carries the S net, and counts like any other.
+            // The pair fits when the two LUTs read at most five distinct nets between them (xc7_logic_tile_valid's
+            // count): a net on two pins of one LUT, or on a pin of each, takes one physical pin.
             auto pins_fit = [](const std::vector<NetInfo *> &a, const std::vector<NetInfo *> &b) {
-                int need = int(a.size() + b.size()) - 5;
-                const bool nothing_to_share = need <= 0;
-                if (nothing_to_share)
-                    return true;
-                int shared = 0;
+                pool<IdString> distinct;
                 for (NetInfo *x : a)
-                    for (NetInfo *y : b) {
-                        const bool same_net = x == y;
-                        if (same_net)
-                            shared++;
-                    }
-                return shared >= need;
+                    distinct.insert(x->name);
+                for (NetInfo *y : b)
+                    distinct.insert(y->name);
+                return distinct.size() <= 5;
             };
             const bool di_has_lut = di_lut != nullptr;
             if (di_has_lut) {

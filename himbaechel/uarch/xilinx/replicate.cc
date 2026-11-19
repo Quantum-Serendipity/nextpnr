@@ -17,7 +17,7 @@
  *  net's, the flip-flop is copied once per extra cluster -- same D, clock,
  *  enable, reset and INIT, named <original>$dup<n> -- each copy taking its
  *  cluster's sinks and a free flip-flop site next to them.  The LVS checker
- *  knows a $dup copy stands for its original.  -o replicate-merged=off
+ *  knows a $dup copy stands for its original.  -o replicate=off
  *  disables it.
  *
  *  Permission to use, copy, modify, and/or distribute this software for any

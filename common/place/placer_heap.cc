@@ -666,8 +666,6 @@ class HeAPPlacer
     {
         if (cfg.ff_bel_bucket == BelBucketId() || cfg.disableCtrlSet)
             return;
-        FastBels::FastBelsData *ff_bels;
-        fast_bels.getBelsForBelBucket(cfg.ff_bel_bucket, &ff_bels);
         control_sets.reset(max_x + 1, max_y + 1);
         // Every tile with a flip-flop bel gets its groups, bound or not:
         // fast_bels lists only the free bels, so a tile whose flip-flops
@@ -683,7 +681,6 @@ class HeAPPlacer
             if (no_groups_yet)
                 tile.resize(cfg.ff_control_set_groups.size());
         }
-        (void)ff_bels;
         for (int g = 0; g < int(cfg.ff_control_set_groups.size()); g++) {
             for (int z : cfg.ff_control_set_groups.at(g)) {
                 z_to_ctrl_set[z] = g;

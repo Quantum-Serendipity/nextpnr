@@ -660,13 +660,15 @@ TEST_F(XilinxPackTest, carry_di_from_a_single_load_lut_packs_the_lut)
     EXPECT_EQ(lut->constr_z, (1 << 4) | BEL_5LUT);
 }
 
-TEST_F(XilinxPackTest, carry_di_lut_counts_pins_beside_an_s_feedthrough)
+TEST_F(XilinxPackTest, carry_di_lut_counts_distinct_nets_beside_an_s_feedthrough)
 {
     // YosysHQ/nextpnr#1816: S[1] comes from the fabric, so it gets a
     // one-input feed-through LUT, and DI[1] from a LUT5 using five pins on
-    // four nets.  Counted by distinct nets that is 4 + 1 = 5 and the LUT5
-    // was packed beside the feed-through; the slice model counts pins, 5 + 1
-    // with none shared, and refused every slice, so the placer gave up.
+    // four nets.  The pair shares A1-A5, and the slice model counts the
+    // distinct nets the two read (#187): 4 + 1 = 5, so the LUT5 fits beside
+    // the feed-through, with fixup_placement giving the net on two pins one
+    // physical pin.  The packer counts the same way; counted as pins, 5 + 1
+    // with none shared, it sent DI to the bypass for nothing.
     XC7Packer p(ctx, xil);
     p.pack_constants();
     NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
@@ -695,31 +697,24 @@ TEST_F(XilinxPackTest, carry_di_lut_counts_pins_beside_an_s_feedthrough)
 
     CellInfo *c4 = packed_carry4(ctx);
     ASSERT_NE(c4, nullptr);
-    // the five-pin LUT does not fit beside the feed-through: DI[1] takes the bypass pin
-    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), 1 << 1);
-    EXPECT_NE(lut->cluster, c4->cluster);
-    // and the position's pins add up: every clustered LUT pair fits five pins
+    // the five-pin, four-net LUT fits beside the feed-through: DI[1] keeps its LUT
+    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), 0);
+    EXPECT_EQ(lut->cluster, c4->cluster);
+    // and the position's nets add up: every clustered LUT pair reads at most five distinct nets
     for (CellInfo *child : c4->constr_children) {
         if (!child->constr_abs_z || (child->constr_z & 0xf) != BEL_5LUT)
             continue;
         int pos = child->constr_z >> 4;
-        int pins5 = 0, pins6 = 0, shared = 0;
-        std::vector<NetInfo *> nets6;
+        std::set<NetInfo *> nets;
         for (CellInfo *other : c4->constr_children)
             if (other->constr_abs_z && other->constr_z == ((pos << 4) | BEL_6LUT))
                 for (int j = 0; j < 6; j++)
-                    if (NetInfo *n = other->getPort(ctx->idf("I%d", j))) {
-                        nets6.push_back(n);
-                        pins6++;
-                    }
+                    if (NetInfo *n = other->getPort(ctx->idf("I%d", j)))
+                        nets.insert(n);
         for (int j = 0; j < 5; j++)
-            if (NetInfo *n = child->getPort(ctx->idf("I%d", j))) {
-                pins5++;
-                for (NetInfo *m : nets6)
-                    if (m == n)
-                        shared++;
-            }
-        EXPECT_GE(shared, pins5 + pins6 - 5) << "position " << pos;
+            if (NetInfo *n = child->getPort(ctx->idf("I%d", j)))
+                nets.insert(n);
+        EXPECT_LE(int(nets.size()), 5) << "position " << pos;
     }
 }
 

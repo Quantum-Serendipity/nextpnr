@@ -821,8 +821,9 @@ def main():
                             node_wires.append(NodeWire(gx(w.tile.x), gy(w.tile.y), w.index))
                     is_boundary = bool(outs and node_wires)
                     if timing_file:
-                        # A node of one wire left is still timed as all of its wires
-                        timing_class = timing_file.node_class([(w.tile.tile_type(), w.name()) for w in n.wires])
+                        # A node of one wire left is still timed as all of its wires.  Only for a node that will be
+                        # added (node_class registers the class in the chipdb): a node whose every wire was pruned is not.
+                        timing_class = timing_file.node_class([(w.tile.tile_type(), w.name()) for w in n.wires]) if node_wires else ""
                     else:
                         timing_class = f"node_c{node_cap}_c{node_res}"
                         ncls = cal_node_class(wires_of_node)

@@ -2131,31 +2131,8 @@ struct Router2
 #else
         std::vector<boost::thread> threads;
         // Deepest sub-regions first; each level's regions are disjoint
-        for (int level = depth; level >= 2; level--) {
-            std::vector<std::unique_ptr<ThreadContext>> stcs;
-            for (auto &sr : subs) {
-                const bool other_level = sr.level != level;
-                if (other_level)
-                    continue;
-                stcs.emplace_back(new ThreadContext());
-                auto &st = *stcs.back();
-                st.rng.rngseed(ctx->rng64());
-                st.bb = sr.bb;
-                st.route_nets = sr.nets;
-            }
-            const bool nothing_at_this_level = stcs.empty();
-            if (nothing_at_this_level)
-                continue;
-            for (size_t i = 0; i < stcs.size(); i++) {
-                ThreadContext *st = stcs[i].get();
-                threads.emplace_back([this, st]() { router_thread(*st, /*is_mt=*/true, "sub-regions"); });
-            }
-            for (auto &t : threads)
-                t.join();
-            threads.clear();
-            for (auto &st : stcs)
-                sub_failed.insert(sub_failed.end(), st->failed_nets.begin(), st->failed_nets.end());
-        }
+        for (int level = depth; level >= 2; level--)
+            route_regions(subs, level, "sub-regions");
         // Multithreaded part of routing - quadrants
         for (int i = 0; i < Nq; i++) {
             threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true, "quadrants"); });
@@ -2209,15 +2186,21 @@ struct Router2
     }
 
     // How many quadtree levels to cut the quadrants into: 4^depth regions at
-    // the deepest level, matched to the threads available (the setting from
-    // --threads, else the hardware), overridable with --router2-partition-depth.
+    // the deepest level, matched to the threads asked for with --threads,
+    // overridable with --router2-partition-depth.  Without --threads the depth
+    // is 1, the four quadrants main always routes: the partition decides which
+    // nets route together and in what order, so taking it from the host's core
+    // count would give the same design, seed and flags a different route on
+    // every machine.
     int partition_depth()
     {
         const bool depth_is_set = ctx->settings.count(ctx->id("router2/partitionDepth"));
         if (depth_is_set)
             return std::max(1, ctx->setting<int>("router2/partitionDepth"));
-        int threads = ctx->settings.count(ctx->id("threads")) ? ctx->setting<int>("threads")
-                                                              : int(std::thread::hardware_concurrency());
+        const bool threads_given = ctx->settings.count(ctx->id("threads")) != 0;
+        if (!threads_given)
+            return 1;
+        const int threads = ctx->setting<int>("threads");
         const bool many_threads = threads >= 64;
         if (many_threads)
             return 3;

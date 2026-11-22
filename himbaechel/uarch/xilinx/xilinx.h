@@ -248,7 +248,7 @@ struct XilinxImpl : HimbaechelAPI
 
     void fixup_placement();
     void fixup_routing();
-    int lut_perm_rebound = 0; // permuted LUT inputs fixup_routing re-bound: timing is re-analysed after it when > 0
+    int lut_perm_remapped = 0; // permuted LUT inputs fixup_routing moved to their physical pin: timing is re-analysed after it when > 0
     // X_ORIG_PORT_A1 to A6 as this context's ids: getCellDelay looks a LUT's inputs up by them.
     IdString x_orig_port_ids[6];
     void fixup_hold();

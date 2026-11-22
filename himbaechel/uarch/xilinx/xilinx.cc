@@ -1689,11 +1689,12 @@ void XilinxImpl::postRoute()
     // hold-fix added and the pips the re-bind above moved, not the router's first result.
     pr_window_report();
     ctx->assignArchInfo();
-    // The router's own timing report came before fixup_routing re-bound the permuted LUT inputs, so it used estimates for
-    // them; analyse again, so the logged Fmax and --report agree with the SDF.
-    const bool inputs_were_rebound = lut_perm_rebound > 0;
-    if (inputs_were_rebound) {
-        log_info("Timing after re-binding permuted LUT inputs:\n");
+    // The router's own timing report came before fixup_routing moved the permuted LUT inputs to their physical pins and
+    // re-bound their routes, so it used estimates for them; analyse again, so the logged Fmax and --report agree with
+    // the SDF. Keyed on the move, not the re-bind: an input whose identity pip another net holds is moved all the same.
+    const bool inputs_were_remapped = lut_perm_remapped > 0;
+    if (inputs_were_remapped) {
+        log_info("Timing after re-mapping permuted LUT inputs:\n");
         timing_analysis(ctx, false /*histogram*/, true /*fmax*/, ctx->detailed_timing_report /*path*/, false /*warn*/,
                         true /*update_results*/);
     }

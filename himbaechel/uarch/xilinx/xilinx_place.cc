@@ -1173,7 +1173,9 @@ void XilinxImpl::fixup_routing()
             }
             ctx->bindPip(b.new_pip, b.net, b.strength);
         }
-        lut_perm_rebound = int(binds.size()) - conflict;
+        // Every swapped input was moved to its physical pin above, re-bound or not, so the timing is analysed again
+        // after this whenever there was one: an input left on its old pip is timed as an estimate from here on.
+        lut_perm_remapped = int(swaps.size());
         log_info("    %d permuted LUT inputs re-bound to the identity pip of their physical pin (%d without one, %d sharing "
                  "one, %d held by another net)\n",
                  int(binds.size()), unmatched, shared, conflict);

@@ -119,7 +119,7 @@ Line counts are `wc -l` on the checkout.
 | `constids.inc` | 758 | IdString constant list (cell types, pins, params, wire intents). Note: it is a **superset** shared with the UltraScale vocabulary (URAM288, DSP48E2, IDELAYE3/ODELAYE3, ISERDESE3/OSERDESE3, BITSLICE, MMCME3/4, PLLE3/4, IBUFDS_GTE3/4, GTHE*, SYSMONE4) — many of these are **not** actually packed by this uarch. |
 | `gen/xilinx_gen.py` | 489 | Chipdb generator entrypoint: imports prjxray + meta, builds tile types/wires/pips/site bels/site pips/nodes/timing/package pins, emits `.bba`. |
 | `gen/xilinx_device.py` | 544 | prjxray→Python object model: `Device`/`Tile`/`Site`/`Wire`/`Node`/`PIP`/`Package`; loads tilegrid, tile_type JSONs, site_type JSONs, tileconn, package_pins.csv, timings. |
-| `gen/filters.py` | 110 | prjxray→nextpnr mapping: bel Z overrides (SLICE/BRAM), bel-type overrides (`SLICE_LUTX`/`SLICE_FFX`/IOL_*/BUFGCTRL…), pip inclusion/exclusion rules. |
+| `gen/filters.py` | 110 | prjxray→nextpnr mapping: bel Z overrides (SLICE/BRAM), bel-type overrides (`SLICE_LUTX`/`SLICE_FFX`/IOL_*/BUFGCTRL…), pip inclusion/exclusion rules; the block RAM address cascade pips (`CASCINBOT_ADDR*`/`CASCINTOP_ADDR*`) are left out, so a high-fanout address net cannot chain through a column of block RAMs. |
 | `gen/parse_sdf.py` | 145 | Minimal SDF parser used to import prjxray cell timing. |
 | `gen/tileconn.py` | 38 | Applies `tileconn.json` wire-pair merges to build cross-tile *nodes*. |
 | `sparse_refine.cc` | 177 | Post-placement refinement of DSP48E1 / RAMB36E1 / RAMB18E1 sites (`refine_sparse_bels`): each movable, unclustered cell is offered every free bel of its type within 80 tiles (inside its region, if constrained) and takes the one minimising the HPWL of its nets; passes repeat while anything moves. These bels sit in a few columns five rows apart, which HeAP's spreading and the annealer's shrinking radius handle badly (DSPs 27–38 tiles from their adder trees on a dense design; 9–11 after). `-o sparse-refine=off`. |
@@ -241,14 +241,12 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   - Cell timing: `CellTimingPOD`/`CellPinTimingPOD` with comb arcs and reg arcs
     (setup/hold/clk_q) — LUT and FF from fixed figures in `xilinx_gen.py` (on virtex7 the
     Vivado-oracle values of `docs/extracted-timing.md`); SELMUX2_1, CARRY4 and BRAM imported
-    from prjxray SDF. RAMB36 arcs name the packed cell's CLKARDCLKL/CLKBWRCLKL clock pins.
-  - **Silicon calibration** (`gen/xilinx_gen.py --timing-cal <json>`, optional, on the X-Ray
-    delays, not on a timing directory's): per wire class a factor on pip delay, output
-    resistance and node resistance; a fixed cost per use of fan and bypass pips; and a stage
-    cost per physical LUT pin, carried on the permutation pips (`LUTPIN<j>`) and the pin's LUT
-    arc, with route-throughs priced by input pin (`LUTRT<j>`). Unknown keys in the JSON are
-    refused. Without the option the chipdb is unchanged. Data for xc7vx485t-2:
-    openXC7/prjxray-db `virtex7/timings/silicon/xc7vx485t-2.cal.json`.
+    from prjxray SDF. The RAMB36 arcs name the packed cell's `CLKARDCLKL`/`CLKBWRCLKL` clock
+    pins (it has no unsuffixed clock port, and the analyser drops an arc on a port the cell
+    lacks without a word). Block RAM input hold is Vivado's figure per family
+    (`import_bram_timings`: virtex7 measured on the VC707; kintex7, artix7 and zynq7 the
+    `Hold_ramb36e1_*` library values) in place of the SDF's device-level envelope (up to
+    0.67 ns on the data inputs).
 - **Speed grades**: with X-Ray's delays alone there is one, `DEFAULT`, for every part.
   With a timing directory (`HIMBAECHEL_XILINX_TIMING`, `xilinx_gen.py --timing`,
   `gen/xilinx_timing.py`) the chipdb has every grade the directory has (`1`, `2`, `2L`,
@@ -273,6 +271,9 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   region row and column, calibrated per die (the xc7vx485t today; `-o clock-tree=on|off|force`),
   fed to timing analysis through `getArcDelayOverride` on every BUFGCTRL-driven sink and
   switched on as `timing/clockSkew`. Dies without measured rates keep their routed delay.
+  A block RAM's clock pin is taken 60 ps after a flip-flop's in the same region (Vivado's
+  effective skew, common-path pessimism removed), not the 430 ps of the raw destination-delay
+  difference, at which every FF→BRAM data input failed hold.
 - **Block RAM placement** (`bram_place.cc`): after the heap placer, block RAMs sharing read-mux
   logic are grouped and re-placed around their consumers with the delay matrix and the clock
   tree as the cost, then the lifted logic is placed again; `-o bram-place=on|off|force`, on by

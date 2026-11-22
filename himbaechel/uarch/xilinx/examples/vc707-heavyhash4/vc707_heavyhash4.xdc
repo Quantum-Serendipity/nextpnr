@@ -52,10 +52,3 @@ set_property LOC BUFGCTRL_X0Y3 [get_cells u_core_u_framing_eth_i_phy_bufg_txoutr
 # The PHY's recovered clocks (nextpnr cannot derive them from the GTX).
 create_clock -name eth_rx_clk -period 8.000 [get_nets u_core.u_framing.eth.eth_rx_clk]
 create_clock -name eth_tx_clk -period 8.000 [get_nets u_core.u_framing.eth.eth_tx_clk]
-
-# Lanes: one BUFHCE per lane, and a BUFHCE drives exactly the clock region it
-# sits in, so nextpnr keeps the whole lane there (heavyhash_lanes.sv).  Sites:
-# BUFHCE_X0Y<12r..12r+11> drive region X0Y<r>, BUFHCE_X1Y<12r..> region X1Y<r>.
-# The control logic, MAC and PHY are left X1Y0 and the PHY MMCM regions X0Y3/X0Y6.
-# One line per lane in LANES (vc707_miner.json); a line for an absent lane is
-# ignored.

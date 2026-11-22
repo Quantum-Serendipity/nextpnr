@@ -112,7 +112,7 @@ Line counts are `wc -l` on the checkout.
 | `pins.cc` | 480 | Static pin metadata: `get_invertible_pins` (IS_*_INVERTED optimisations), `get_tied_pins` (unused-pin tie values for BRAM/BUFG/PLL/DSP/IOLOGIC), `get_bram36_ul_pins` (36-bit BRAM L/U pin pairs), `get_top_level_pins`. |
 | `pins.h` | 33 | Declarations for the above. |
 | `xdc.cc` | 270 | Minimal XDC parser (see §4). |
-| `xilinx_place.cc` | 640 | `xc7_logic_tile_valid` (full SLICEL/SLICEM legality: LUT/FF/MUX/CARRY/X-input conflicts), `isBelLocationValid`, `fixup_placement` (post-placement LUT5/6 input remap, PS7 tie-offs), `fixup_routing` (LUT permutation pip → `X_ORIG_PORT` remap, OSERDESE3 bypass). |
+| `xilinx_place.cc` | 640 | `xc7_logic_tile_valid` (full SLICEL/SLICEM legality: LUT/FF/MUX/CARRY/X-input conflicts), `isBelLocationValid`, `fixup_placement` (post-placement LUT5/6 input remap, PS7 tie-offs), `fixup_routing` (LUT permutation pip → `X_ORIG_PORT` remap, then each permuted input's route re-bound to the identity pip of its physical pin, the end its port now has; OSERDESE3 bypass). |
 | `fasm.cc` | 1864 | FASM backend (`FasmBackend`): pseudo-pip config tables, LUT/FF/carry/logic, IO/IOLOGIC, BRAM, clocking (BUFGCTRL/PLL/MMCM/HCLK), DSP bit emission; MMCM/PLL divide/phase computation. |
 | `mmcm_tables.cc` | 144 | `Xc7MMCM` lookup tables (FILTREG1 filter values per CLKFBOUT_MULT, LKTABLE). |
 | `extra_data.h` | 107 | `XlnxBelExtraDataPOD`, `BelSiteKey`, `XlnxPipExtraDataPOD`, `PipClass` enum (TILE_ROUTING/SITE_ENTRY/SITE_EXIT/SITE_INTERNAL/LUT_PERMUTATION/LUT_ROUTETHRU/CONST_DRIVER), `SiteInstPOD`, `XlnxTileInstExtraDataPOD`, `LogicBelTypeZ`/`BRAMBelTypeZ`/`DSP48E1BelTypeZ` Z encodings. |
@@ -256,7 +256,11 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
 - **Runtime lookups**: `Arch::get_cell_timing_idx`, `lookup_cell_delay`,
   `lookup_cell_seq_timings`, `lookup_port_tmg_type` (`arch.cc:470-520`) feed the shared
   timing engine through `getCellDelay`/`getPortTimingClass`/`getPortClockingInfo`
-  (`arch.h:882-895`, defaulted in `himbaechel_api.cc:90-103`). BRAM variants select
+  (`arch.h:882-895`, defaulted in `himbaechel_api.cc:90-103`). `XilinxImpl::getCellDelay`
+  drops a LUT input arc on a pin carrying a net the LUT does not read (no `X_ORIG_PORT_<pin>`
+  while the LUT has them: a 5LUT/6LUT pair is connected to every net on its shared pins), and
+  `postRoute` runs timing analysis again once `fixup_routing` has moved permuted inputs, so
+  the logged Fmax, `--report` and the SDF agree. BRAM variants select
   WTDP/WSDP × RTDP/RSDP timing by rewriting `timing_index` (`xilinx.cc:602-612`).
   `XilinxImpl::getPortClockingInfo` (`xilinx.cc:1637`) starts from the chipdb arcs, all stored
   as rising, and reports the falling edge for a clock the cell inverts (`IS_C_INVERTED`,

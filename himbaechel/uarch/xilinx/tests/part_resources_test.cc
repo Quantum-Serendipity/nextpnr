@@ -66,6 +66,16 @@ TEST_F(XilinxPartResourcesTest, xc7a50t_counts_its_luts_once)
     EXPECT_EQ(n[id_RAMB18E1], 150);
 }
 
+TEST_F(XilinxPartResourcesTest, xc7a15t_counts_what_it_offers)
+{
+    auto n = counted("xc7a15tcsg324-1");
+    EXPECT_EQ(n[id_SLICE_LUTX], 10400);
+    EXPECT_EQ(n[id_SLICE_FFX], 20800);
+    EXPECT_EQ(n[id_DSP48E1], 45);
+    EXPECT_EQ(n[id_RAMB36E1], 25);
+    EXPECT_EQ(n[id_RAMB18E1], 50);
+}
+
 TEST_F(XilinxPartResourcesTest, xc7a35t_counts_what_it_offers)
 {
     auto n = counted("xc7a35tcsg324-1");

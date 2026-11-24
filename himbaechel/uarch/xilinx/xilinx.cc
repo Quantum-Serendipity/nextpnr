@@ -156,6 +156,7 @@ void XilinxImpl::init_database(Arch *arch)
         PartLimits limits;
     };
     static const SharedDie shared_dies[] = {
+            {"xc7a15t", "xc7a50t", {10400, 20800, 25, 45}},
             {"xc7a35t", "xc7a50t", {20800, 41600, 50, 90}},
             {"xc7z007s", "xc7z010", {14400, 28800, 50, 66}},
             {"xc7z035", "xc7z045", {171900, 343800, 500, 900}},
